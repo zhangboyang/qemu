@@ -1556,6 +1556,7 @@ specific_ss.add(when: 'CONFIG_TCG', if_true: files(
   'tcg/tcg.c',
 ))
 specific_ss.add(when: 'CONFIG_TCG_INTERPRETER', if_true: files('disas/tci.c', 'tcg/tci.c'))
+specific_ss.add(when: 'CONFIG_TCG_LLVM', if_true: files('tcg/tcg-llvm.cpp'))
 
 subdir('backends')
 subdir('disas')
@@ -2112,6 +2113,7 @@ summary_info += {'TCG support':       config_all.has_key('CONFIG_TCG')}
 if config_all.has_key('CONFIG_TCG')
   summary_info += {'TCG debug enabled': config_host.has_key('CONFIG_DEBUG_TCG')}
   summary_info += {'TCG interpreter':   config_host.has_key('CONFIG_TCG_INTERPRETER')}
+  summary_info += {'TCG llvm':   config_host.has_key('CONFIG_TCG_LLVM')}
 endif
 summary_info += {'malloc trim support': has_malloc_trim}
 summary_info += {'RDMA support':      config_host.has_key('CONFIG_RDMA')}

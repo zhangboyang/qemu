@@ -345,6 +345,7 @@ tsan="no"
 fortify_source=""
 strip_opt="yes"
 tcg_interpreter="no"
+tcg_llvm="no"
 bigendian="no"
 mingw32="no"
 gcov="no"
@@ -1110,6 +1111,10 @@ for opt do
   ;;
   --enable-tcg-interpreter) tcg_interpreter="yes"
   ;;
+  --disable-tcg-llvm) tcg_llvm="no"
+  ;;
+  --enable-tcg-llvm) tcg_llvm="yes"
+  ;;
   --disable-cap-ng)  cap_ng="no"
   ;;
   --enable-cap-ng) cap_ng="yes"
@@ -1850,6 +1855,7 @@ disabled with --disable-FEATURE, default is enabled if available:
   xkbcommon       xkbcommon support
   rng-none        dummy RNG, avoid using /dev/(u)random and getrandom()
   libdaxctl       libdaxctl support
+  tcg-llvm        tcg llvm jit support
 
 NOTE: The object files are built at the place where configure is launched
 EOF
@@ -6317,6 +6323,9 @@ fi
 if test "$tcg" = "enabled"; then
   if test "$tcg_interpreter" = "yes" ; then
     echo "CONFIG_TCG_INTERPRETER=y" >> $config_host_mak
+  fi
+  if test "$tcg_llvm" = "yes" ; then
+    echo "CONFIG_TCG_LLVM=y" >> $config_host_mak
   fi
 fi
 if test "$fdatasync" = "yes" ; then
