@@ -27,6 +27,9 @@
 #include "disas/disas.h"
 #include "exec/exec-all.h"
 #include "tcg/tcg.h"
+#ifdef CONFIG_TCG_LLVM
+#include "tcg/tcg-llvm.h"
+#endif
 #if defined(CONFIG_USER_ONLY)
 #include "qemu.h"
 #if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
@@ -244,6 +247,9 @@ static void page_table_config_init(void)
 
 void cpu_gen_init(void)
 {
+#ifdef CONFIG_TCG_LLVM
+    tcg_llvm_init();
+#endif
     tcg_context_init(&tcg_init_ctx);
 }
 

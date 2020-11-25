@@ -50,6 +50,8 @@
 
 #include "tcg/tcg-op.h"
 
+#include "tcg/tcg-llvm.h"
+
 #if UINTPTR_MAX == UINT32_MAX
 # define ELF_CLASS  ELFCLASS32
 #else
@@ -996,6 +998,8 @@ void tcg_context_init(TCGContext *s)
     }
 
     alloc_tcg_plugin_context(s);
+
+    tcg_llvm_context_init(s);
 
     tcg_ctx = s;
     /*
@@ -4162,6 +4166,10 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
         }
         assert(!error);
     }
+#endif
+
+#ifdef CONFIG_TCG_LLVM
+    tcg_llvm_gen_code(s, tb);
 #endif
 
 #ifdef CONFIG_PROFILER
