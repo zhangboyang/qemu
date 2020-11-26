@@ -1,52 +1,56 @@
 #include "qemu/osdep.h"
+#include "qemu/log.h"
+#include "exec/exec-all.h"
 #include "exec/log.h"
 #include "tcg/tcg.h"
 #include "tcg/tcg-llvm.h"
 
-#include <llvm-c/Core.h>
-#include <llvm-c/Target.h>
-#include <llvm-c/Orc.h>
-#include <llvm-c/LLJIT.h>
-
-static void check_error(LLVMErrorRef e)
+static inline void check_error(LLVMErrorRef e)
 {
     if (e) {
         char *m = LLVMGetErrorMessage(e);
-        puts(m);
+        qemu_log("%s\n", m);
         LLVMDisposeErrorMessage(m);
         exit(1);
     }
 }
 
+static inline void dump_module(LLVMModuleRef mdl)
+{
+    char *str = LLVMPrintModuleToString(mdl);
+    qemu_log("%s", str);
+    LLVMDisposeMessage(str);
+}
+
 void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
 {
-    printf("gen tb %p\n", tb);
+    char tbname[128];
+    sprintf(tbname, "tb_%016" PRIx64, (uint64_t) tb->pc); // FIXME
+
+    TCGLLVMContext *l = s->llvm_ctx;
     
-    LLVMContextRef context = LLVMOrcThreadSafeContextGetContext(s->llvm_ctx->TSCtx);
-    LLVMModuleRef module = LLVMModuleCreateWithNameInContext("my module", context);
-    LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+    LLVMModuleRef mdl = LLVMModuleCreateWithNameInContext("my module", l->ctx);
 
-    LLVMTypeRef ft = LLVMFunctionType(LLVMInt32TypeInContext(context), NULL, 0, 0);
-    LLVMValueRef fn = LLVMAddFunction(module, "myfunc", ft);
-    LLVMBasicBlockRef bb = LLVMAppendBasicBlockInContext(context, fn, "entry");
-    LLVMPositionBuilderAtEnd(builder, bb);
-    unsigned noreturn = LLVMGetEnumAttributeKindForName("noreturn", strlen("noreturn"));
-    LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, LLVMCreateEnumAttribute(context, noreturn, 0));
-    LLVMBuildRetVoid(builder);
+
+    LLVMTypeRef ft = LLVMFunctionType(LLVMInt32TypeInContext(l->ctx), NULL, 0, 0);
+
+    LLVMValueRef fn = LLVMAddFunction(mdl, tbname, ft);
+    LLVMBasicBlockRef bb = LLVMAppendBasicBlockInContext(l->ctx, fn, "entry");
+    LLVMPositionBuilderAtEnd(l->bldr, bb);
+
+    LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->noreturn);
+    LLVMBuildRetVoid(l->bldr);
     
-    char *str = LLVMPrintModuleToString(module);
-    puts(str);
-    LLVMDisposeMessage(str);
+    dump_module(mdl);
 
-    LLVMOrcThreadSafeModuleRef TSM = LLVMOrcCreateNewThreadSafeModule(module, s->llvm_ctx->TSCtx);
-    LLVMOrcJITDylibRef JD = LLVMOrcLLJITGetMainJITDylib(s->llvm_ctx->JIT);
-    check_error(LLVMOrcLLJITAddLLVMIRModule(s->llvm_ctx->JIT, JD, TSM));
 
+    LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(mdl, l->tsctx);
+    check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
     LLVMOrcJITTargetAddress addr;
-    check_error(LLVMOrcLLJITLookup(s->llvm_ctx->JIT, &addr, "myfunc"));
-    printf("myfunc = %p\n", addr);
+    check_error(LLVMOrcLLJITLookup(l->jit, &addr, tbname));
+    printf("%s = %p\n", tbname, addr);
 
-    log_disas((void *)addr, 100);
+    log_disas((void *)addr, 50);
 
     TCGOp *op;
 
@@ -57,30 +61,32 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         c = op->opc;
         def = &tcg_op_defs[c];
         
-        switch (c) {
+       /* switch (c) {
         case INDEX_op_ld_i32:
             op->args[0];
         default:
             printf("%d\n", c);
             //tcg_abort();
-        }
+        }*/
     }
 }
 void tcg_llvm_context_init(TCGContext *s)
 {
-    puts("context init!");
-    s->llvm_ctx = g_malloc(sizeof(TCGLLVMContext));
+    TCGLLVMContext *l = g_malloc(sizeof(*l));
+    s->llvm_ctx = l;
     
-    //LLVMOrcLLJITBuilderRef LB = LLVMOrcCreateLLJITBuilder();
-    //LLVMOrcLLJITBuilderSetJITTargetMachineBuilder(LB, JTMB);
-    //LLVMOrcCreateLLJIT(&JIT, 
-    
-    check_error(LLVMOrcCreateLLJIT(&s->llvm_ctx->JIT, NULL));
-    s->llvm_ctx->TSCtx = LLVMOrcCreateNewThreadSafeContext();
+    check_error(LLVMOrcCreateLLJIT(&l->jit, NULL));
+    l->tsctx = LLVMOrcCreateNewThreadSafeContext();
+    l->ctx = LLVMOrcThreadSafeContextGetContext(l->tsctx);
+    l->bldr = LLVMCreateBuilderInContext(l->ctx);
+    l->jd = LLVMOrcLLJITGetMainJITDylib(l->jit);
+
+#define GET_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
+    l->noreturn = LLVMCreateEnumAttribute(l->ctx, GET_KINDID("noreturn"), 0);
+#undef GET_KINDID
 }
 void tcg_llvm_init(void)
 {
-    puts("llvm init!");
     LLVMInitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
     LLVMInitializeNativeAsmParser();
