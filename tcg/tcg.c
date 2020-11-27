@@ -2059,14 +2059,14 @@ static void tcg_dump_ops(TCGContext *s, bool have_prefs)
                 if (k != 0) {
                     col += qemu_log(",");
                 }
-                col += qemu_log("%s", tcg_get_arg_str(s, buf, sizeof(buf),
+                col += qemu_log("O%s", tcg_get_arg_str(s, buf, sizeof(buf),
                                                       op->args[k++]));
             }
             for (i = 0; i < nb_iargs; i++) {
                 if (k != 0) {
                     col += qemu_log(",");
                 }
-                col += qemu_log("%s", tcg_get_arg_str(s, buf, sizeof(buf),
+                col += qemu_log("I%s", tcg_get_arg_str(s, buf, sizeof(buf),
                                                       op->args[k++]));
             }
             switch (c) {
@@ -2126,7 +2126,7 @@ static void tcg_dump_ops(TCGContext *s, bool have_prefs)
                 break;
             }
             for (; i < nb_cargs; i++, k++) {
-                col += qemu_log("%s$0x%" TCG_PRIlx, k ? "," : "", op->args[k]);
+                col += qemu_log("%sC$0x%" TCG_PRIlx, k ? "," : "", op->args[k]);
             }
         }
 
@@ -4168,10 +4168,6 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
     }
 #endif
 
-#ifdef CONFIG_TCG_LLVM
-    tcg_llvm_gen_code(s, tb);
-#endif
-
 #ifdef CONFIG_PROFILER
     qatomic_set(&prof->opt_time, prof->opt_time - profile_getclock());
 #endif
@@ -4219,6 +4215,10 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
         qemu_log("\n");
         qemu_log_unlock(logfile);
     }
+#endif
+
+#ifdef CONFIG_TCG_LLVM
+    tcg_llvm_gen_code(s, tb);
 #endif
 
     tcg_reg_alloc_start(s);

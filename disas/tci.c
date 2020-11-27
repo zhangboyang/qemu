@@ -53,8 +53,8 @@ int print_insn_tci(bfd_vma addr, disassemble_info *info)
         int nb_iargs = def->nb_iargs;
         int nb_cargs = def->nb_cargs;
         /* TODO: Improve disassembler output. */
-        info->fprintf_func(info->stream, "%s\to=%d i=%d c=%d",
-                           def->name, nb_oargs, nb_iargs, nb_cargs);
+        info->fprintf_func(info->stream, "%s(%d)\to=%d i=%d c=%d",
+                           def->name, op, nb_oargs, nb_iargs, nb_cargs);
     }
 
     return length;

@@ -513,7 +513,7 @@ uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr)
 
         /* Skip opcode and size entry. */
         tb_ptr += 2;
-
+        //printf("tci %d\n", opc);
         switch (opc) {
         case INDEX_op_call:
             t0 = tci_read_ri(regs, &tb_ptr);
@@ -603,6 +603,7 @@ uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr)
             t0 = *tb_ptr++;
             t1 = tci_read_r(regs, &tb_ptr);
             t2 = tci_read_s32(&tb_ptr);
+            //printf("%d %d %p\n", sizeof(t1), TARGET_LONG_BITS, (uint32_t *)(t1 + t2));
             tci_write_reg32(regs, t0, *(uint32_t *)(t1 + t2));
             break;
         case INDEX_op_st8_i32:

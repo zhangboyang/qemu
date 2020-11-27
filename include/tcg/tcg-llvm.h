@@ -15,8 +15,17 @@ typedef struct TCGLLVMContext {
     LLVMBuilderRef bldr;
     LLVMOrcJITDylibRef jd;
 
+    /* Convenient values */
     LLVMAttributeRef noreturn;
-    
+    LLVMTypeRef hostty;
+    LLVMTypeRef guestty;
+    int tbargs;
+    LLVMTypeRef tbtype;
+
+    /* Temporary values */
+    char tbname[128];
+    LLVMValueRef temps[TCG_MAX_TEMPS];
+    LLVMValueRef env;
 } TCGLLVMContext;
 
 void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb);
