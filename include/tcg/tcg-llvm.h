@@ -6,8 +6,11 @@
 #include <llvm-c/Target.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/LLJIT.h>
+#include <llvm-c/Analysis.h>
 
 typedef struct TCGLLVMContext {
+    TCGContext *s;
+
     /* Created objects */
     LLVMOrcLLJITRef jit;
     LLVMOrcThreadSafeContextRef tsctx;
@@ -17,8 +20,6 @@ typedef struct TCGLLVMContext {
 
     /* Convenient values */
     LLVMAttributeRef noreturn;
-    LLVMTypeRef hostty;
-    LLVMTypeRef guestty;
     int tbargs;
     LLVMTypeRef tbtype;
 
