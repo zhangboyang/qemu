@@ -34,6 +34,9 @@
 #include "tcg/tcg-mo.h"
 #include "tcg-target.h"
 #include "qemu/int128.h"
+#ifdef CONFIG_TCG_LLVM
+#include <llvm-c/Core.h>
+#endif
 
 /* XXX: make safe guess about sizes */
 #define MAX_OP_PER_INSTR 266
@@ -265,6 +268,7 @@ struct TCGLabel {
     } u;
     QSIMPLEQ_HEAD(, TCGRelocation) relocs;
     QSIMPLEQ_ENTRY(TCGLabel) next;
+    LLVMBasicBlockRef llvm_bb;
 };
 
 typedef struct TCGPool {

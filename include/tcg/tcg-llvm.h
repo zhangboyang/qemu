@@ -6,7 +6,6 @@
 #include <llvm-c/Target.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/LLJIT.h>
-#include <llvm-c/Analysis.h>
 
 typedef struct TCGLLVMContext {
     TCGContext *s;
@@ -16,7 +15,9 @@ typedef struct TCGLLVMContext {
     LLVMOrcThreadSafeContextRef tsctx;
     LLVMContextRef ctx;
     LLVMBuilderRef bldr;
+    LLVMBuilderRef ebldr; /* builder for function entry block */
     LLVMOrcJITDylibRef jd;
+    LLVMPassManagerRef pm;
 
     /* Convenient values */
     LLVMAttributeRef noreturn;
@@ -26,6 +27,7 @@ typedef struct TCGLLVMContext {
     /* Temporary values */
     char tbname[128];
     LLVMValueRef temps[TCG_MAX_TEMPS];
+    LLVMValueRef fn;
     LLVMValueRef env;
 } TCGLLVMContext;
 
