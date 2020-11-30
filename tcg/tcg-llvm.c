@@ -18,40 +18,43 @@
 #define CAT3(x, y, z) CAT(CAT(x, y), z)
 
 
-/* Convenient macros */
 
+/* LLVM convenient macros */
 
-
-#define HBITS TCG_TARGET_REG_BITS
-#define GBITS TARGET_LONG_BITS
-
+/* Context */
 #define CTX (l->ctx)
 #define FN (l->fn)
+
+/* HBITS: host word bits */
+#define HBITS TCG_TARGET_REG_BITS
+/* GBITS: guest word bits */
+#define GBITS TARGET_LONG_BITS
+
+/* Types for integers and pointer to integers */
 #define INTTY(bits) CAT3(LLVMInt, bits, TypeInContext)(CTX)
 #define PTRTY(ty) LLVMPointerType(ty, 0)
 
-#define HOSTTY INTTY(HBITS)
-#define GUESTTY INTTY(GBITS)
-
+/* Load and Store */
 #undef LD
 #undef ST
 #define LD(ptr) LLVMBuildLoad(BLDR, ptr, "")
 #define ST(val, ptr) LLVMBuildStore(BLDR, val, ptr)
 
+/* Create a new basic block */
 #define NEWBB(name) LLVMAppendBasicBlockInContext(CTX, FN, name)
-#define BR(dst) LLVMBuildBr(BLDR, dst)
 
+/* Branch and Conditional branch */
+#define BR(dst) LLVMBuildBr(BLDR, dst)
 #define CONDBR(i1, t, f) LLVMBuildCondBr(BLDR, i1, t, f)
 #define INTCMP(x, y, tcg_cond) LLVMBuildICmp(BLDR, map_cond(tcg_cond), x, y, "")
 #define CMPBR(x, y, tcg_cond, t, f) CONDBR(INTCMP(x, y, tcg_cond), t, f)
 
-
-#define ALLOCA(name) LLVMBuildAlloca(BLDR, HOSTTY, name)
-#define CONST(c) LLVMConstInt(HOSTTY, c, 0)
-
+/* Convert integer to pointer */
 #define I2P(i, bits) LLVMBuildIntToPtr(BLDR, i, PTRTY(INTTY(bits)), "")
+/* Convert integer+offset to pointer */
 #define II2P(i1, i2, bits) I2P(LLVMBuildAdd(BLDR, i1, i2, ""), bits)
 
+/* Extend or truncate integers */
 #define CAST(val, src_bits, dst_bits, ext_kind) ( \
     (src_bits) < (dst_bits) ? ( \
         CAT3(LLVMBuild, ext_kind, Ext)(BLDR, val, INTTY(dst_bits), "") \
@@ -63,16 +66,20 @@
         ) \
     ) \
 )
-#define CASTS(val, src_bits, dst_bits) CAST(val, src_bits, dst_bits, S)
-#define CASTZ(val, src_bits, dst_bits) CAST(val, src_bits, dst_bits, Z)
+/* Operations on HBITS integer */ 
+#define ALLOCA(name) LLVMBuildAlloca(BLDR, INTTY(HBITS), name)
+#define CONST(c) LLVMConstInt(INTTY(HBITS), c, 0)
+#define TRUNC(hval, dst_bits) CAST(hval, HBITS, dst_bits, Z)
+#define EXTEND(val, src_bits, ext_kind) CAST(val, src_bits, HBITS, ext_kind)
+#define ZEXT(val, src_bits) EXTEND(val, src_bits, Z)
+#define SEXT(val, src_bits) EXTEND(val, src_bits, S)
+#define TRUNCZEXT(hval, value_bits) ZEXT(TRUNC(hval, value_bits), value_bits)
+#define TRUNCSEXT(hval, value_bits) SEXT(TRUNC(hval, value_bits), value_bits)
 
-#define TRUNC(val, dst_bits) CAST(val, HBITS, dst_bits, Z)
 
 
 
-
-
-
+/* Map TCG Condition to LLVM Integer Predicate */
 static inline LLVMIntPredicate map_cond(TCGCond tcg_cond)
 {
     switch (tcg_cond) {
@@ -107,41 +114,50 @@ static inline void dump_module(LLVMModuleRef mdl)
     LLVMDisposeMessage(str);
 }
 
+/* Get L-value of tcg-op arg */
 static inline LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
 {
+/* Definitions and initializations should in entry basic block
+ * So define builder to l->ebldr which is pointed to entry basic block */
 #define BLDR (l->ebldr)
     TCGTemp *ts = arg_temp(arg);
     int idx = temp_idx(ts);
 
-    if (ts->temp_global) {
-        //printf("lval=%s\n", ts->name);
-        
-        assert(strcmp(ts->name, "env") != 0);
+    if (ts->temp_global) {        
         if (!l->temps[idx]) {
+            LLVMValueRef env = LLVMGetParam(l->fn, l->tbargs);
+
+            /* Allocate a stack variable */
             l->temps[idx] = ALLOCA(ts->name);
 
-            assert(strcmp(ts->mem_base->name, "env") == 0);
-            switch (ts->type) {
+            /* Assign initial value */
+            if (strcmp(ts->name, "env") == 0) {
+                /* env is last function argument */
+                ST(env, l->temps[idx]);
+            } else {
+                if (strcmp(ts->mem_base->name, "env") != 0) {
+                    tcg_abort(); /* TODO: non-env global temp */
+                }
+                switch (ts->type) {
 #define PREPARE_TEMP(bits) \
     ST( \
-        CASTZ(LD(II2P(l->env, CONST(ts->mem_offset), bits)), bits, HBITS), \
+        ZEXT(LD(II2P(env, CONST(ts->mem_offset), bits)), bits), \
         l->temps[idx] \
     )
-            case TCG_TYPE_I32: PREPARE_TEMP(32); break;
-            case TCG_TYPE_I64: PREPARE_TEMP(64); break;
-            default:
-                tcg_abort();
+                case TCG_TYPE_I32: PREPARE_TEMP(32); break;
+                case TCG_TYPE_I64: PREPARE_TEMP(64); break;
+                default:
+                    tcg_abort();
+                }
             }
         }
         return l->temps[idx];
     } else if (ts->temp_local) {
-        //snprintf(buf, buf_size, "loc%d", idx - s->nb_globals);
-        tcg_abort();
+        tcg_abort(); /* TODO */
     } else {
-        char buf[100];
-        sprintf(buf, "tmp%d", idx - l->s->nb_globals);
-        //printf("lval=%s\n", buf);
         if (!l->temps[idx]) {
+            char buf[100];
+            sprintf(buf, "tmp%d", idx - l->s->nb_globals);
             l->temps[idx] = ALLOCA(buf);
         }
         return l->temps[idx];
@@ -149,25 +165,7 @@ static inline LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
 #undef BLDR
 }
 
-static inline LLVMValueRef get_rvalue(TCGLLVMContext *l, TCGArg arg)
-{
-    TCGTemp *ts = arg_temp(arg);
-    if (ts->temp_global) {
-        /* XXX: do not use string compare here */
-        if (strcmp(ts->name, "env") == 0) {
-            return l->env;
-        }
-    }
-#define BLDR (l->bldr)
-    return LD(get_lvalue(l, arg));
-#undef BLDR
-}
-
-static inline LLVMValueRef get_const(TCGLLVMContext *l, TCGArg arg)
-{
-    return CONST(arg);
-}
-
+/* Get basic block of tcg-op arg label */
 static inline LLVMBasicBlockRef get_label(TCGLLVMContext *l, TCGArg arg)
 {
     TCGLabel *label = arg_label(arg);
@@ -179,6 +177,7 @@ static inline LLVMBasicBlockRef get_label(TCGLLVMContext *l, TCGArg arg)
     return label->llvm_bb;
 }
 
+/* Finish current block and switch builder to the given block */
 static inline void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
 {
     if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(l->bldr))) {
@@ -191,11 +190,12 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
 {
     TCGLLVMContext *l = s->llvm_ctx;
 
-    sprintf(l->tbname, "tb_%016" PRIx64, (uint64_t) tb->pc);
+    char tbname[128];
+    sprintf(tbname, "tb_%016" PRIx64, (uint64_t) tb->pc);
     memset(l->temps, 0, sizeof(l->temps));
     
-    LLVMModuleRef mdl = LLVMModuleCreateWithNameInContext(l->tbname, l->ctx);
-    l->fn = LLVMAddFunction(mdl, l->tbname, l->tbtype);
+    LLVMModuleRef mdl = LLVMModuleCreateWithNameInContext(tbname, l->ctx);
+    l->fn = LLVMAddFunction(mdl, tbname, l->tbtype);
     //LLVMSetFunctionCallConv(fn, LLVMFastCallConv);
     //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->noreturn);
     LLVMBasicBlockRef entry_bb, body_bb;
@@ -205,9 +205,6 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
     LLVMPositionBuilderBefore(l->ebldr, LLVMBuildBr(l->ebldr, body_bb));
     LLVMPositionBuilderAtEnd(l->bldr, body_bb);
 
-    //l->env = LLVMBuildAlloca(l->bldr, l->hostty, "env");
-    //LLVMBuildStore(l->bldr, LLVMGetParam(fn, l->tbargs), l->env);
-    l->env = LLVMGetParam(l->fn, l->tbargs);
     
 
     TCGOp *op;
@@ -224,40 +221,30 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         switch (c) {
 #define BLDR (l->bldr)
 
-/* l-value of op args */
+/* L-value of op args */
 #define ARG0L  get_lvalue(l, op->args[0])
 #define ARG1L  get_lvalue(l, op->args[1])
 #define ARG2L  get_lvalue(l, op->args[2])
 #define ARG3L  get_lvalue(l, op->args[3])
-/* write value to l-value */
-#define VARW(lval, val, val_bits, ext_kind) \
-    ST(CAST(val, val_bits, HBITS, ext_kind), lval)
-#define VARW32(lval, val) VARW(lval, val, 32, Z)
-#define VARW64(lval, val) VARW(lval, val, 64, Z)
-/* read value from l-value */
-#define VARR(lval, val_bits) \
-    CASTZ(LD(lval), HBITS, val_bits)
-#define VARR32(lval) VARR(lval, 32)
-#define VARR64(lval) VARR(lval, 64)
-
-/* r-value of op args */
-#define ARG0   get_rvalue(l, op->args[0])
-#define ARG1   get_rvalue(l, op->args[1])
-#define ARG2   get_rvalue(l, op->args[2])
-#define ARG3   get_rvalue(l, op->args[3])
-#define ARG0C  get_const (l, op->args[0])
-#define ARG1C  get_const (l, op->args[1])
-#define ARG2C  get_const (l, op->args[2])
-#define ARG3C  get_const (l, op->args[3])
-
-#define ARG0BB get_label (l, op->args[0])
-#define ARG1BB get_label (l, op->args[1])
-#define ARG2BB get_label (l, op->args[2])
-#define ARG3BB get_label (l, op->args[3])
+/* R-value of op args */
+#define ARG0R  LD(ARG0L)
+#define ARG1R  LD(ARG1L)
+#define ARG2R  LD(ARG2L)
+#define ARG3R  LD(ARG3L)
+/* Const-value of op args */
+#define ARG0C  CONST(op->args[0])
+#define ARG1C  CONST(op->args[1])
+#define ARG2C  CONST(op->args[2])
+#define ARG3C  CONST(op->args[3])
+/* Basic block of op args */
+#define ARG0BB get_label(l, op->args[0])
+#define ARG1BB get_label(l, op->args[1])
+#define ARG2BB get_label(l, op->args[2])
+#define ARG3BB get_label(l, op->args[3])
 
 
-#define OP_LD(src_bits, ext_kind) \
-    VARW(ARG0L, LD(II2P(ARG1, ARG2C, src_bits)), src_bits, ext_kind)
+#define OP_LD(bits, ext_kind) \
+    ST(EXTEND(LD(II2P(ARG1R, ARG2C, bits)), bits, ext_kind), ARG0L)
         case INDEX_op_ld8u_i32:   OP_LD( 8, Z); break;
         case INDEX_op_ld8s_i32:   OP_LD( 8, S); break;
         case INDEX_op_ld16u_i32:  OP_LD(16, Z); break;
@@ -273,8 +260,8 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         case INDEX_op_ld_i64:     OP_LD(64, Z); break;
 #endif
 
-#define OP_ST(dst_bits) \
-    ST(VARR(ARG0L, dst_bits), II2P(ARG1, ARG2C, dst_bits))
+#define OP_ST(bits) \
+    ST(TRUNC(ARG0R, bits), II2P(ARG1R, ARG2C, bits))
         case INDEX_op_st8_i32:   OP_ST( 8); break;
         case INDEX_op_st16_i32:  OP_ST(16); break;
         case INDEX_op_st_i32:    OP_ST(32); break;
@@ -285,19 +272,18 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         case INDEX_op_st_i64:    OP_ST(64); break;
 #endif
 
-        case INDEX_op_mov_i32:  VARW32(ARG0L, ARG1); break;
-        case INDEX_op_movi_i32: VARW32(ARG0L, ARG1C); break;
-
+        case INDEX_op_mov_i32:  ST(TRUNCZEXT(ARG1R, 32), ARG0L); break;
+        case INDEX_op_movi_i32: ST(TRUNCZEXT(ARG1C, 32), ARG0L); break;
 #if HBITS == 64
-        case INDEX_op_mov_i64:  VARW64(ARG0L, ARG1); break;
-        case INDEX_op_movi_i64: VARW64(ARG0L, ARG1C); break;
+        case INDEX_op_mov_i64:  ST(TRUNCZEXT(ARG1R, 64), ARG0L); break;
+        case INDEX_op_movi_i64: ST(TRUNCZEXT(ARG1C, 64), ARG0L); break;
 #endif
 
 #define OP_BRCOND(src_bits) \
 do { \
     LLVMBasicBlockRef next_bb = NEWBB(""), branch_bb = ARG3BB; \
     CMPBR( \
-        TRUNC(ARG0, src_bits), TRUNC(ARG1, src_bits), op->args[2], \
+        TRUNC(ARG0R, src_bits), TRUNC(ARG1R, src_bits), op->args[2], \
         branch_bb, next_bb \
     ); \
     switch_bb(l, next_bb); \
@@ -335,8 +321,8 @@ do { \
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
     LLVMOrcJITTargetAddress addr;
-    check_error(LLVMOrcLLJITLookup(l->jit, &addr, l->tbname));
-    printf("%s = %p\n", l->tbname, (void *)addr);
+    check_error(LLVMOrcLLJITLookup(l->jit, &addr, tbname));
+    printf("%s = %p\n", tbname, (void *)addr);
     log_disas((void *)addr, 50);
 }
 
@@ -373,9 +359,9 @@ void tcg_llvm_context_init(TCGContext *s)
         LLVMTypeRef args[nargs];
         int i;
         for (i = 0; i < l->tbargs; i++) {
-            args[i] = GUESTTY;
+            args[i] = INTTY(GBITS);
         }
-        args[l->tbargs] = HOSTTY;
+        args[l->tbargs] = INTTY(HBITS);
         l->tbtype = LLVMFunctionType(LLVMVoidTypeInContext(l->ctx), args, nargs, 0);
     }
 }
