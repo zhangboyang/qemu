@@ -25,6 +25,7 @@
 #include "sysemu/arch_init.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-qdev.h"
+#include "qapi/qmp/dispatch.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/config-file.h"
@@ -38,6 +39,7 @@
 #include "migration/misc.h"
 #include "migration/migration.h"
 #include "qemu/cutils.h"
+#include "hw/qdev-properties.h"
 #include "hw/clock.h"
 
 /*
@@ -237,15 +239,15 @@ static DeviceClass *qdev_get_device_class(const char **driver, Error **errp)
 
     if (object_class_is_abstract(oc)) {
         error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "driver",
-                   "non-abstract device type");
+                   "a non-abstract device type");
         return NULL;
     }
 
     dc = DEVICE_CLASS(oc);
     if (!dc->user_creatable ||
-        (qdev_hotplug && !dc->hotpluggable)) {
+        (phase_check(PHASE_MACHINE_READY) && !dc->hotpluggable)) {
         error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "driver",
-                   "pluggable device type");
+                   "a pluggable device type");
         return NULL;
     }
 
@@ -572,35 +574,12 @@ void qdev_set_id(DeviceState *dev, const char *id)
     }
 }
 
-static int is_failover_device(void *opaque, const char *name, const char *value,
-                        Error **errp)
-{
-    if (strcmp(name, "failover_pair_id") == 0) {
-        QemuOpts *opts = (QemuOpts *)opaque;
-
-        if (qdev_should_hide_device(opts)) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-static bool should_hide_device(QemuOpts *opts)
-{
-    if (qemu_opt_foreach(opts, is_failover_device, opts, NULL) == 0) {
-        return false;
-    }
-    return true;
-}
-
 DeviceState *qdev_device_add(QemuOpts *opts, Error **errp)
 {
     DeviceClass *dc;
     const char *driver, *path;
     DeviceState *dev = NULL;
     BusState *bus = NULL;
-    bool hide;
 
     driver = qemu_opt_get(opts, "driver");
     if (!driver) {
@@ -634,14 +613,22 @@ DeviceState *qdev_device_add(QemuOpts *opts, Error **errp)
             return NULL;
         }
     }
-    hide = should_hide_device(opts);
 
-    if ((hide || qdev_hotplug) && bus && !qbus_is_hotpluggable(bus)) {
-        error_setg(errp, QERR_BUS_NO_HOTPLUG, bus->name);
-        return NULL;
+    if (qemu_opt_get(opts, "failover_pair_id")) {
+        if (!opts->id) {
+            error_setg(errp, "Device with failover_pair_id don't have id");
+            return NULL;
+        }
+        if (qdev_should_hide_device(opts)) {
+            if (bus && !qbus_is_hotpluggable(bus)) {
+                error_setg(errp, QERR_BUS_NO_HOTPLUG, bus->name);
+            }
+            return NULL;
+        }
     }
 
-    if (hide) {
+    if (phase_check(PHASE_MACHINE_READY) && bus && !qbus_is_hotpluggable(bus)) {
+        error_setg(errp, QERR_BUS_NO_HOTPLUG, bus->name);
         return NULL;
     }
 
@@ -654,15 +641,17 @@ DeviceState *qdev_device_add(QemuOpts *opts, Error **errp)
     dev = qdev_new(driver);
 
     /* Check whether the hotplug is allowed by the machine */
-    if (qdev_hotplug && !qdev_hotplug_allowed(dev, errp)) {
-        goto err_del_dev;
-    }
+    if (phase_check(PHASE_MACHINE_READY)) {
+        if (!qdev_hotplug_allowed(dev, errp)) {
+            goto err_del_dev;
+        }
 
-    if (!bus && qdev_hotplug && !qdev_get_machine_hotplug_handler(dev)) {
-        /* No bus, no machine hotplug handler --> device is not hotpluggable */
-        error_setg(errp, "Device '%s' can not be hotplugged on this machine",
-                   driver);
-        goto err_del_dev;
+        if (!bus && !qdev_get_machine_hotplug_handler(dev)) {
+            /* No bus, no machine hotplug handler --> device is not hotpluggable */
+            error_setg(errp, "Device '%s' can not be hotplugged on this machine",
+                       driver);
+            goto err_del_dev;
+        }
     }
 
     qdev_set_id(dev, qemu_opts_id(opts));
@@ -943,12 +932,6 @@ BlockBackend *blk_by_qdev_id(const char *id, Error **errp)
     return blk;
 }
 
-void qdev_machine_init(void)
-{
-    qdev_get_peripheral_anon();
-    qdev_get_peripheral();
-}
-
 QemuOptsList qemu_device_opts = {
     .name = "device",
     .implied_opt_name = "driver",
@@ -1002,4 +985,15 @@ int qemu_global_option(const char *str)
     }
 
     return 0;
+}
+
+bool qmp_command_available(const QmpCommand *cmd, Error **errp)
+{
+    if (!phase_check(PHASE_MACHINE_READY) &&
+        !(cmd->options & QCO_ALLOW_PRECONFIG)) {
+        error_setg(errp, "The command '%s' is permitted only after machine initialization has completed",
+                   cmd->name);
+        return false;
+    }
+    return true;
 }

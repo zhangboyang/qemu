@@ -1406,25 +1406,25 @@ ERST
 
 DEF("fsdev", HAS_ARG, QEMU_OPTION_fsdev,
     "-fsdev local,id=id,path=path,security_model=mapped-xattr|mapped-file|passthrough|none\n"
-    " [,writeout=immediate][,readonly][,fmode=fmode][,dmode=dmode]\n"
+    " [,writeout=immediate][,readonly=on][,fmode=fmode][,dmode=dmode]\n"
     " [[,throttling.bps-total=b]|[[,throttling.bps-read=r][,throttling.bps-write=w]]]\n"
     " [[,throttling.iops-total=i]|[[,throttling.iops-read=r][,throttling.iops-write=w]]]\n"
     " [[,throttling.bps-total-max=bm]|[[,throttling.bps-read-max=rm][,throttling.bps-write-max=wm]]]\n"
     " [[,throttling.iops-total-max=im]|[[,throttling.iops-read-max=irm][,throttling.iops-write-max=iwm]]]\n"
     " [[,throttling.iops-size=is]]\n"
-    "-fsdev proxy,id=id,socket=socket[,writeout=immediate][,readonly]\n"
-    "-fsdev proxy,id=id,sock_fd=sock_fd[,writeout=immediate][,readonly]\n"
+    "-fsdev proxy,id=id,socket=socket[,writeout=immediate][,readonly=on]\n"
+    "-fsdev proxy,id=id,sock_fd=sock_fd[,writeout=immediate][,readonly=on]\n"
     "-fsdev synth,id=id\n",
     QEMU_ARCH_ALL)
 
 SRST
-``-fsdev local,id=id,path=path,security_model=security_model [,writeout=writeout][,readonly][,fmode=fmode][,dmode=dmode] [,throttling.option=value[,throttling.option=value[,...]]]``
+``-fsdev local,id=id,path=path,security_model=security_model [,writeout=writeout][,readonly=on][,fmode=fmode][,dmode=dmode] [,throttling.option=value[,throttling.option=value[,...]]]``
   \ 
-``-fsdev proxy,id=id,socket=socket[,writeout=writeout][,readonly]``
+``-fsdev proxy,id=id,socket=socket[,writeout=writeout][,readonly=on]``
   \
-``-fsdev proxy,id=id,sock_fd=sock_fd[,writeout=writeout][,readonly]``
+``-fsdev proxy,id=id,sock_fd=sock_fd[,writeout=writeout][,readonly=on]``
   \
-``-fsdev synth,id=id[,readonly]``
+``-fsdev synth,id=id[,readonly=on]``
     Define a new file system device. Valid options are:
 
     ``local``
@@ -1467,7 +1467,7 @@ SRST
         guest only when the data has been reported as written by the
         storage subsystem.
 
-    ``readonly``
+    ``readonly=on``
         Enables exporting 9p share as a readonly mount for guests. By
         default read-write access is given.
 
@@ -1532,18 +1532,18 @@ ERST
 
 DEF("virtfs", HAS_ARG, QEMU_OPTION_virtfs,
     "-virtfs local,path=path,mount_tag=tag,security_model=mapped-xattr|mapped-file|passthrough|none\n"
-    "        [,id=id][,writeout=immediate][,readonly][,fmode=fmode][,dmode=dmode][,multidevs=remap|forbid|warn]\n"
-    "-virtfs proxy,mount_tag=tag,socket=socket[,id=id][,writeout=immediate][,readonly]\n"
-    "-virtfs proxy,mount_tag=tag,sock_fd=sock_fd[,id=id][,writeout=immediate][,readonly]\n"
-    "-virtfs synth,mount_tag=tag[,id=id][,readonly]\n",
+    "        [,id=id][,writeout=immediate][,readonly=on][,fmode=fmode][,dmode=dmode][,multidevs=remap|forbid|warn]\n"
+    "-virtfs proxy,mount_tag=tag,socket=socket[,id=id][,writeout=immediate][,readonly=on]\n"
+    "-virtfs proxy,mount_tag=tag,sock_fd=sock_fd[,id=id][,writeout=immediate][,readonly=on]\n"
+    "-virtfs synth,mount_tag=tag[,id=id][,readonly=on]\n",
     QEMU_ARCH_ALL)
 
 SRST
-``-virtfs local,path=path,mount_tag=mount_tag ,security_model=security_model[,writeout=writeout][,readonly] [,fmode=fmode][,dmode=dmode][,multidevs=multidevs]``
+``-virtfs local,path=path,mount_tag=mount_tag ,security_model=security_model[,writeout=writeout][,readonly=on] [,fmode=fmode][,dmode=dmode][,multidevs=multidevs]``
   \ 
-``-virtfs proxy,socket=socket,mount_tag=mount_tag [,writeout=writeout][,readonly]``
+``-virtfs proxy,socket=socket,mount_tag=mount_tag [,writeout=writeout][,readonly=on]``
   \ 
-``-virtfs proxy,sock_fd=sock_fd,mount_tag=mount_tag [,writeout=writeout][,readonly]``
+``-virtfs proxy,sock_fd=sock_fd,mount_tag=mount_tag [,writeout=writeout][,readonly=on]``
   \
 ``-virtfs synth,mount_tag=mount_tag``
     Define a new virtual filesystem device and expose it to the guest using
@@ -1598,7 +1598,7 @@ SRST
         guest only when the data has been reported as written by the
         storage subsystem.
 
-    ``readonly``
+    ``readonly=on``
         Enables exporting 9p share as a readonly mount for guests. By
         default read-write access is given.
 
@@ -3713,17 +3713,6 @@ SRST
     Do not start CPU at startup (you must type 'c' in the monitor).
 ERST
 
-DEF("realtime", HAS_ARG, QEMU_OPTION_realtime,
-    "-realtime [mlock=on|off]\n"
-    "                run qemu with realtime features\n"
-    "                mlock=on|off controls mlock support (default: on)\n",
-    QEMU_ARCH_ALL)
-SRST
-``-realtime mlock=on|off``
-    Run qemu with realtime features. mlocking qemu and guest memory can
-    be enabled via ``mlock=on`` (enabled by default).
-ERST
-
 DEF("overcommit", HAS_ARG, QEMU_OPTION_overcommit,
     "-overcommit [mem-lock=on|off][cpu-pm=on|off]\n"
     "                run qemu with overcommit hints\n"
@@ -3739,8 +3728,7 @@ SRST
 
     Locking qemu and guest memory can be enabled via ``mem-lock=on``
     (disabled by default). This works when host memory is not
-    overcommitted and reduces the worst-case latency for guest. This is
-    equivalent to ``realtime``.
+    overcommitted and reduces the worst-case latency for guest.
 
     Guest ability to manage power state of host cpus (increasing latency
     for other processes on the same host cpu, but decreasing latency for
@@ -3894,6 +3882,31 @@ SRST
     changes to the disk image.
 ERST
 
+DEF("action", HAS_ARG, QEMU_OPTION_action,
+    "-action reboot=none|shutdown\n"
+    "                   action when guest reboots [default=none]\n"
+    "-action shutdown=poweroff|pause\n"
+    "                   action when guest shuts down [default=poweroff]\n"
+    "-action panic=poweroff|pause|none\n"
+    "                   action when guest panics [default=poweroff]\n"
+    "-action watchdog=reset|shutdown|poweroff|inject-nmi|pause|debug|none\n"
+    "                   action when watchdog fires [default=reset]\n",
+    QEMU_ARCH_ALL)
+SRST
+``-action event=action``
+    The action parameter serves to modify QEMU's default behavior when
+    certain guest events occur. It provides a generic method for specifying the
+    same behaviors that are modified by the ``-no-reboot`` and ``-no-shutdown``
+    parameters.
+
+    Examples:
+
+    ``-action panic=none``
+    ``-action reboot=shutdown,shutdown=pause``
+    ``-watchdog i6300esb -action watchdog=pause``
+
+ERST
+
 DEF("loadvm", HAS_ARG, QEMU_OPTION_loadvm, \
     "-loadvm [tag|id]\n" \
     "                start right away with a saved state (loadvm in monitor)\n",
@@ -3958,29 +3971,33 @@ SRST
 ERST
 
 DEF("icount", HAS_ARG, QEMU_OPTION_icount, \
-    "-icount [shift=N|auto][,align=on|off][,sleep=on|off,rr=record|replay,rrfile=<filename>,rrsnapshot=<snapshot>]\n" \
+    "-icount [shift=N|auto][,align=on|off][,sleep=on|off][,rr=record|replay,rrfile=<filename>[,rrsnapshot=<snapshot>]]\n" \
     "                enable virtual instruction counter with 2^N clock ticks per\n" \
     "                instruction, enable aligning the host and virtual clocks\n" \
-    "                or disable real time cpu sleeping\n", QEMU_ARCH_ALL)
+    "                or disable real time cpu sleeping, and optionally enable\n" \
+    "                record-and-replay mode\n", QEMU_ARCH_ALL)
 SRST
-``-icount [shift=N|auto][,rr=record|replay,rrfile=filename,rrsnapshot=snapshot]``
+``-icount [shift=N|auto][,align=on|off][,sleep=on|off][,rr=record|replay,rrfile=filename[,rrsnapshot=snapshot]]``
     Enable virtual instruction counter. The virtual cpu will execute one
     instruction every 2^N ns of virtual time. If ``auto`` is specified
     then the virtual cpu speed will be automatically adjusted to keep
     virtual time within a few seconds of real time.
-
-    When the virtual cpu is sleeping, the virtual time will advance at
-    default speed unless ``sleep=on|off`` is specified. With
-    ``sleep=on|off``, the virtual time will jump to the next timer
-    deadline instantly whenever the virtual cpu goes to sleep mode and
-    will not advance if no timer is enabled. This behavior give
-    deterministic execution times from the guest point of view.
 
     Note that while this option can give deterministic behavior, it does
     not provide cycle accurate emulation. Modern CPUs contain
     superscalar out of order cores with complex cache hierarchies. The
     number of instructions executed often has little or no correlation
     with actual performance.
+
+    When the virtual cpu is sleeping, the virtual time will advance at
+    default speed unless ``sleep=on`` is specified. With
+    ``sleep=on``, the virtual time will jump to the next timer
+    deadline instantly whenever the virtual cpu goes to sleep mode and
+    will not advance if no timer is enabled. This behavior gives
+    deterministic execution times from the guest point of view.
+    The default if icount is enabled is ``sleep=off``.
+    ``sleep=on`` cannot be used together with either ``shift=auto``
+    or ``align=on``.
 
     ``align=on`` will activate the delay algorithm which will try to
     synchronise the host clock and the virtual clock. The goal is to
@@ -3991,15 +4008,17 @@ SRST
     ``shift`` is ``auto``. Note: The sync algorithm will work for those
     shift values for which the guest clock runs ahead of the host clock.
     Typically this happens when the shift value is high (how high
-    depends on the host machine).
+    depends on the host machine). The default if icount is enabled
+    is ``align=off``.
 
-    When ``rr`` option is specified deterministic record/replay is
-    enabled. Replay log is written into filename file in record mode and
-    read from this file in replay mode.
-
-    Option rrsnapshot is used to create new vm snapshot named snapshot
-    at the start of execution recording. In replay mode this option is
-    used to load the initial VM state.
+    When the ``rr`` option is specified deterministic record/replay is
+    enabled. The ``rrfile=`` option must also be provided to
+    specify the path to the replay log. In record mode data is written
+    to this file, and in replay mode it is read back.
+    If the ``rrsnapshot`` option is given then it specifies a VM snapshot
+    name. In record mode, a new VM snapshot with the given name is created
+    at the start of execution recording. In replay mode this option
+    specifies the snapshot name used to load the initial VM state.
 ERST
 
 DEF("watchdog", HAS_ARG, QEMU_OPTION_watchdog, \
@@ -4071,21 +4090,6 @@ SRST
 
     ``-echr 0x14``; \ ``-echr 20``
 
-ERST
-
-DEF("show-cursor", 0, QEMU_OPTION_show_cursor, \
-    "-show-cursor    show cursor\n", QEMU_ARCH_ALL)
-SRST
-``-show-cursor``
-    Show cursor.
-ERST
-
-DEF("tb-size", HAS_ARG, QEMU_OPTION_tb_size, \
-    "-tb-size n      set TB size\n", QEMU_ARCH_ALL)
-SRST
-``-tb-size n``
-    Set TCG translation block cache size. Deprecated, use
-    '\ ``-accel tcg,tb-size=n``\ ' instead.
 ERST
 
 DEF("incoming", HAS_ARG, QEMU_OPTION_incoming, \

@@ -773,6 +773,28 @@ elif get_option('vhost_user_blk_server').disabled() or not have_system
     have_vhost_user_blk_server = false
 endif
 
+if get_option('fuse').disabled() and get_option('fuse_lseek').enabled()
+  error('Cannot enable fuse-lseek while fuse is disabled')
+endif
+
+fuse = dependency('fuse3', required: get_option('fuse'),
+                  version: '>=3.1', method: 'pkg-config',
+                  static: enable_static)
+
+fuse_lseek = not_found
+if not get_option('fuse_lseek').disabled()
+  if fuse.version().version_compare('>=3.8')
+    # Dummy dependency
+    fuse_lseek = declare_dependency()
+  elif get_option('fuse_lseek').enabled()
+    if fuse.found()
+      error('fuse-lseek requires libfuse >=3.8, found ' + fuse.version())
+    else
+      error('fuse-lseek requires libfuse, which was not found')
+    endif
+  endif
+endif
+
 #################
 # config-host.h #
 #################
@@ -807,12 +829,19 @@ config_host_data.set('CONFIG_KEYUTILS', keyutils.found())
 config_host_data.set('CONFIG_GETTID', has_gettid)
 config_host_data.set('CONFIG_MALLOC_TRIM', has_malloc_trim)
 config_host_data.set('CONFIG_STATX', has_statx)
+config_host_data.set('CONFIG_FUSE', fuse.found())
+config_host_data.set('CONFIG_FUSE_LSEEK', fuse_lseek.found())
 config_host_data.set('QEMU_VERSION', '"@0@"'.format(meson.project_version()))
 config_host_data.set('QEMU_VERSION_MAJOR', meson.project_version().split('.')[0])
 config_host_data.set('QEMU_VERSION_MINOR', meson.project_version().split('.')[1])
 config_host_data.set('QEMU_VERSION_MICRO', meson.project_version().split('.')[2])
 
+config_host_data.set('HAVE_BTRFS_H', cc.has_header('linux/btrfs.h'))
+config_host_data.set('HAVE_DRM_H', cc.has_header('libdrm/drm.h'))
+config_host_data.set('HAVE_PTY_H', cc.has_header('pty.h'))
 config_host_data.set('HAVE_SYS_IOCCOM_H', cc.has_header('sys/ioccom.h'))
+config_host_data.set('HAVE_SYS_KCOV_H', cc.has_header('sys/kcov.h'))
+config_host_data.set('HAVE_SYS_SIGNAL_H', cc.has_header('sys/signal.h'))
 
 ignored = ['CONFIG_QEMU_INTERP_PREFIX'] # actually per-target
 arrays = ['CONFIG_AUDIO_DRIVERS', 'CONFIG_BDRV_RW_WHITELIST', 'CONFIG_BDRV_RO_WHITELIST']
@@ -1433,6 +1462,7 @@ if have_system
     'hw/misc',
     'hw/misc/macio',
     'hw/net',
+    'hw/net/can',
     'hw/nvram',
     'hw/pci',
     'hw/pci-host',
@@ -1467,6 +1497,7 @@ trace_events_subdirs += [
   'target/arm',
   'target/hppa',
   'target/i386',
+  'target/i386/kvm',
   'target/mips',
   'target/ppc',
   'target/riscv',
@@ -1475,7 +1506,12 @@ trace_events_subdirs += [
   'util',
 ]
 
-subdir('contrib/libvhost-user')
+vhost_user = not_found
+if 'CONFIG_VHOST_USER' in config_host
+  libvhost_user = subproject('libvhost-user')
+  vhost_user = libvhost_user.get_variable('vhost_user_dep')
+endif
+
 subdir('qapi')
 subdir('qobject')
 subdir('stubs')
@@ -2204,6 +2240,8 @@ endif
 summary_info += {'thread sanitizer':  config_host.has_key('CONFIG_TSAN')}
 summary_info += {'rng-none':          config_host.has_key('CONFIG_RNG_NONE')}
 summary_info += {'Linux keyring':     config_host.has_key('CONFIG_SECRET_KEYRING')}
+summary_info += {'FUSE exports':      fuse.found()}
+summary_info += {'FUSE lseek':        fuse_lseek.found()}
 summary(summary_info, bool_yn: true)
 
 if not supported_cpus.contains(cpu)

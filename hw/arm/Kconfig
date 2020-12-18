@@ -156,7 +156,7 @@ config TOSA
 
 config SPITZ
     bool
-    select ADS7846 # display
+    select ADS7846 # touch-screen controller
     select MAX111X # A/D converter
     select WM8750  # audio codec
     select MAX7310 # GPIO expander
@@ -407,6 +407,7 @@ config ASPEED_SOC
     select SSI_M25P80
     select TMP105
     select TMP421
+    select EMC141X
     select UNIMP
     select LED
 

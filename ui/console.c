@@ -1345,7 +1345,7 @@ static QemuConsole *new_console(DisplayState *ds, console_type_t console_type,
     if (QTAILQ_EMPTY(&consoles)) {
         s->index = 0;
         QTAILQ_INSERT_TAIL(&consoles, s, next);
-    } else if (console_type != GRAPHIC_CONSOLE || qdev_hotplug) {
+    } else if (console_type != GRAPHIC_CONSOLE || phase_check(PHASE_MACHINE_READY)) {
         QemuConsole *last = QTAILQ_LAST(&consoles);
         s->index = last->index + 1;
         QTAILQ_INSERT_TAIL(&consoles, s, next);
@@ -1544,19 +1544,27 @@ static void dpy_set_ui_info_timer(void *opaque)
 
 bool dpy_ui_info_supported(QemuConsole *con)
 {
+    if (con == NULL) {
+        con = active_console;
+    }
+
     return con->hw_ops->ui_info != NULL;
 }
 
 const QemuUIInfo *dpy_get_ui_info(const QemuConsole *con)
 {
-    assert(con != NULL);
+    if (con == NULL) {
+        con = active_console;
+    }
 
     return &con->ui_info;
 }
 
 int dpy_set_ui_info(QemuConsole *con, QemuUIInfo *info)
 {
-    assert(con != NULL);
+    if (con == NULL) {
+        con = active_console;
+    }
 
     if (!dpy_ui_info_supported(con)) {
         return -1;
@@ -2120,12 +2128,6 @@ uint32_t qemu_console_get_head(QemuConsole *con)
         con = active_console;
     }
     return con ? con->head : -1;
-}
-
-QemuUIInfo *qemu_console_get_ui_info(QemuConsole *con)
-{
-    assert(con != NULL);
-    return &con->ui_info;
 }
 
 int qemu_console_get_width(QemuConsole *con, int fallback)

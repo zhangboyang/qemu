@@ -16,17 +16,25 @@
 #include "sysemu/replay.h"
 #include "qemu/units.h"
 #include "hw/boards.h"
+#include "hw/loader.h"
 #include "qapi/error.h"
 #include "qapi/qapi-visit-common.h"
 #include "qapi/visitor.h"
 #include "hw/sysbus.h"
+#include "sysemu/cpus.h"
 #include "sysemu/sysemu.h"
+#include "sysemu/reset.h"
+#include "sysemu/runstate.h"
 #include "sysemu/numa.h"
 #include "qemu/error-report.h"
 #include "sysemu/qtest.h"
 #include "hw/pci/pci.h"
 #include "hw/mem/nvdimm.h"
+#include "migration/global_state.h"
 #include "migration/vmstate.h"
+
+GlobalProperty hw_compat_5_2[] = {};
+const size_t hw_compat_5_2_len = G_N_ELEMENTS(hw_compat_5_2);
 
 GlobalProperty hw_compat_5_1[] = {
     { "vhost-scsi", "num_queues", "1"},
@@ -212,6 +220,8 @@ GlobalProperty hw_compat_2_1[] = {
     { "virtio-pci", "virtio-pci-bus-master-bug-migration", "on" },
 };
 const size_t hw_compat_2_1_len = G_N_ELEMENTS(hw_compat_2_1);
+
+MachineState *current_machine;
 
 static char *machine_get_kernel(Object *obj, Error **errp)
 {
@@ -874,9 +884,13 @@ static void machine_initfn(Object *obj)
     MachineState *ms = MACHINE(obj);
     MachineClass *mc = MACHINE_GET_CLASS(obj);
 
+    container_get(obj, "/peripheral");
+    container_get(obj, "/peripheral-anon");
+
     ms->dump_guest_core = true;
     ms->mem_merge = true;
     ms->enable_graphics = true;
+    ms->kernel_cmdline = g_strdup("");
 
     if (mc->nvdimm_supported) {
         Object *obj = OBJECT(ms);
@@ -1074,11 +1088,39 @@ MemoryRegion *machine_consume_memdev(MachineState *machine,
     return ret;
 }
 
+bool machine_smp_parse(MachineState *ms, QemuOpts *opts, Error **errp)
+{
+    MachineClass *mc = MACHINE_GET_CLASS(ms);
+
+    mc->smp_parse(ms, opts);
+
+    /* sanity-check smp_cpus and max_cpus against mc */
+    if (ms->smp.cpus < mc->min_cpus) {
+        error_setg(errp, "Invalid SMP CPUs %d. The min CPUs "
+                   "supported by machine '%s' is %d",
+                   ms->smp.cpus,
+                   mc->name, mc->min_cpus);
+        return false;
+    } else if (ms->smp.max_cpus > mc->max_cpus) {
+        error_setg(errp, "Invalid SMP CPUs %d. The max CPUs "
+                   "supported by machine '%s' is %d",
+                   current_machine->smp.max_cpus,
+                   mc->name, mc->max_cpus);
+        return false;
+    }
+    return true;
+}
+
 void machine_run_board_init(MachineState *machine)
 {
     MachineClass *machine_class = MACHINE_GET_CLASS(machine);
     ObjectClass *oc = object_class_by_name(machine->cpu_type);
     CPUClass *cc;
+
+    /* This checkpoint is required by replay to separate prior clock
+       reading from the other reads, because timer polling functions query
+       clock values from the log. */
+    replay_checkpoint(CHECKPOINT_INIT);
 
     if (machine->ram_memdev_id) {
         Object *o;
@@ -1132,6 +1174,67 @@ void machine_run_board_init(MachineState *machine)
     }
 
     machine_class->init(machine);
+    phase_advance(PHASE_MACHINE_INITIALIZED);
+}
+
+static NotifierList machine_init_done_notifiers =
+    NOTIFIER_LIST_INITIALIZER(machine_init_done_notifiers);
+
+void qemu_add_machine_init_done_notifier(Notifier *notify)
+{
+    notifier_list_add(&machine_init_done_notifiers, notify);
+    if (phase_check(PHASE_MACHINE_READY)) {
+        notify->notify(notify, NULL);
+    }
+}
+
+void qemu_remove_machine_init_done_notifier(Notifier *notify)
+{
+    notifier_remove(notify);
+}
+
+void qdev_machine_creation_done(void)
+{
+    cpu_synchronize_all_post_init();
+
+    if (current_machine->boot_once) {
+        qemu_boot_set(current_machine->boot_once, &error_fatal);
+        qemu_register_reset(restore_boot_order, g_strdup(current_machine->boot_order));
+    }
+
+    /*
+     * ok, initial machine setup is done, starting from now we can
+     * only create hotpluggable devices
+     */
+    phase_advance(PHASE_MACHINE_READY);
+    qdev_assert_realized_properly();
+
+    /* TODO: once all bus devices are qdevified, this should be done
+     * when bus is created by qdev.c */
+    /*
+     * TODO: If we had a main 'reset container' that the whole system
+     * lived in, we could reset that using the multi-phase reset
+     * APIs. For the moment, we just reset the sysbus, which will cause
+     * all devices hanging off it (and all their child buses, recursively)
+     * to be reset. Note that this will *not* reset any Device objects
+     * which are not attached to some part of the qbus tree!
+     */
+    qemu_register_reset(resettable_cold_reset_fn, sysbus_get_default());
+
+    notifier_list_notify(&machine_init_done_notifiers, NULL);
+
+    if (rom_check_and_register_reset() != 0) {
+        exit(1);
+    }
+
+    replay_start();
+
+    /* This checkpoint is required by replay to separate prior clock
+       reading from the other reads, because timer polling functions query
+       clock values from the log. */
+    replay_checkpoint(CHECKPOINT_RESET);
+    qemu_system_reset(SHUTDOWN_CAUSE_NONE);
+    register_global_state();
 }
 
 static const TypeInfo machine_info = {

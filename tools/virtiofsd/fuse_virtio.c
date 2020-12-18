@@ -20,22 +20,12 @@
 #include "fuse_opt.h"
 #include "fuse_virtio.h"
 
-#include <assert.h>
-#include <errno.h>
-#include <glib.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/un.h>
-#include <sys/types.h>
 #include <grp.h>
-#include <unistd.h>
 
-#include "contrib/libvhost-user/libvhost-user.h"
+#include "libvhost-user.h"
 
 struct fv_VuDev;
 struct fv_QueueInfo {
