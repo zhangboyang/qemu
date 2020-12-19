@@ -33,6 +33,16 @@
 /* Types for integers and pointer to integers */
 #define INTTY(bits) CAT3(LLVMInt, bits, TypeInContext)(CTX)
 #define PTRTY(ty) LLVMPointerType(ty, 0)
+#define ELETY(ptr) LLVMGetElementType(ptr)
+#define TYOF(val) LLVMTypeOf(val)
+
+/* Alloca */
+#define ALLOCA(bits, name) LLVMBuildAlloca(BLDR, INTTY(bits), name)
+#define ALLOCAH(name) ALLOCA(HBITS, name)
+
+/* Constant values */
+#define CONST(bits, c) LLVMConstInt(INTTY(bits), c, 0)
+#define CONSTH(c) CONST(HBITS, c)
 
 /* Load and Store */
 #undef LD
@@ -49,39 +59,32 @@
 #define INTCMP(x, y, tcg_cond) LLVMBuildICmp(BLDR, map_cond(tcg_cond), x, y, "")
 #define CMPBR(x, y, tcg_cond, t, f) CONDBR(INTCMP(x, y, tcg_cond), t, f)
 
-/* Convert integer to pointer */
+/* Convert pointers */
+#define P2I(p) LLVMBuildPtrToInt(BLDR, p, INTTY(HBITS), "")
 #define I2P(i, bits) LLVMBuildIntToPtr(BLDR, i, PTRTY(INTTY(bits)), "")
 /* Convert integer+offset to pointer */
 #define II2P(i1, i2, bits) I2P(LLVMBuildAdd(BLDR, i1, i2, ""), bits)
+#define PI2P(p, i, bits) II2P(P2I(p), i, bits)
 
 /* Extend or truncate integers */
+#define TRUNC(val, dst_bits) LLVMBuildTrunc(BLDR, val, INTTY(dst_bits), "")
+#define EXTEND(val, dst_bits, ext_kind) \
+    CAT3(LLVMBuild, ext_kind, Ext)(BLDR, val, INTTY(dst_bits), "")
 #define CAST(val, src_bits, dst_bits, ext_kind) ( \
     (src_bits) < (dst_bits) ? ( \
-        CAT3(LLVMBuild, ext_kind, Ext)(BLDR, val, INTTY(dst_bits), "") \
+        EXTEND(val, dst_bits, ext_kind) \
     ) : ( \
         (src_bits) > (dst_bits) ? ( \
-            LLVMBuildTrunc(BLDR, val, INTTY(dst_bits), "") \
+            TRUNC(val, dst_bits) \
         ) : ( \
             val \
         ) \
     ) \
 )
+#define CASTZ(val, src_bits, dst_bits) CAST(val, src_bits, dst_bits, Z)
+#define TZEXT(val, src_bits, dst_bits) EXTEND(TRUNC(val, src_bits), dst_bits, Z)
+#define TSEXT(val, src_bits, dst_bits) EXTEND(TRUNC(val, src_bits), dst_bits, S)
 
-/* Operations on HBITS integer */ 
-#define ALLOCA(name) LLVMBuildAlloca(BLDR, INTTY(HBITS), name)
-#define DISCARD LLVMGetUndef(INTTY(HBITS))
-#define CONST(c) LLVMConstInt(INTTY(HBITS), c, 0)
-#define TRUNC(hval, dst_bits) CAST(hval, HBITS, dst_bits, Z)
-#define EXTEND(val, src_bits, ext_kind) CAST(val, src_bits, HBITS, ext_kind)
-#define ZEXT(val, src_bits) EXTEND(val, src_bits, Z)
-#define SEXT(val, src_bits) EXTEND(val, src_bits, S)
-#define TRUNCEXTEND(hval, value_bits, ext_kind) \
-    EXTEND(TRUNC(hval, value_bits), value_bits, ext_kind)
-#define TZEXT(hval, value_bits) TRUNCEXTEND(hval, value_bits, Z)
-#define TSEXT(hval, value_bits) TRUNCEXTEND(hval, value_bits, S)
-#define STZ(hval, value_bits, ptr) ST(TZEXT(hval, value_bits), ptr)
-#define STZ32(hval, ptr) STZ(hval, 32, ptr)
-#define STZ64(hval, ptr) STZ(hval, 64, ptr)
 
 /* Map TCG Condition to LLVM Integer Predicate */
 static inline LLVMIntPredicate map_cond(TCGCond tcg_cond)
@@ -129,68 +132,49 @@ static inline LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
 
     if (ts->temp_global) {        
         if (!l->temps[idx]) {
-            LLVMValueRef env = LLVMGetParam(l->fn, l->tbargs);
-
-            /* Allocate a stack variable */
-            l->temps[idx] = ALLOCA(ts->name);
-
             /* Assign initial value */
             if (strcmp(ts->name, "env") == 0) {
-                /* env is last function argument */
-                ST(env, l->temps[idx]);
+                l->temps[idx] = ALLOCAH(ts->name);
+                /* env is a function argument */
+                ST(P2I(l->env), l->temps[idx]);
             } else {
+                LLVMValueRef off, gep;
+                LLVMTypeRef dst_ty;
+
                 if (strcmp(ts->mem_base->name, "env") != 0) {
                     tcg_abort(); /* TODO: non-env global temp */
                 }
+                
                 switch (ts->type) {
-#define PREPARE_TEMP(bits) \
-    ST( \
-        ZEXT(LD(II2P(env, CONST(ts->mem_offset), bits)), bits), \
-        l->temps[idx] \
-    )
-                case TCG_TYPE_I32: PREPARE_TEMP(32); break;
-                case TCG_TYPE_I64: PREPARE_TEMP(64); break;
+                case TCG_TYPE_I32: dst_ty = PTRTY(INTTY(32)); break;
+                case TCG_TYPE_I64: dst_ty = PTRTY(INTTY(64)); break;
                 default:
                     tcg_abort();
                 }
+                
+                off = CONSTH(ts->mem_offset);
+                gep = LLVMBuildInBoundsGEP2(BLDR,
+                    INTTY(8),
+                    l->env,
+                    &off, 1,
+                    ts->name);
+                l->temps[idx] = LLVMBuildBitCast(BLDR, gep, dst_ty, "");
             }
         }
         return l->temps[idx];
-    } else if (ts->temp_local) {
-        tcg_abort(); /* TODO */
     } else {
         if (!l->temps[idx]) {
             char buf[100];
-            sprintf(buf, "tmp%d", idx - l->s->nb_globals);
-            l->temps[idx] = ALLOCA(buf);
-        }
-        return l->temps[idx];
-    }
-#undef BLDR
-}
-
-static inline void flush_temps(TCGLLVMContext *l)
-{
-#define BLDR (l->bldr)
-    LLVMValueRef env = LLVMGetParam(l->fn, l->tbargs);
-    int idx;
-    for (idx = 0; idx < TCG_MAX_TEMPS; idx++) {
-        if (l->temps[idx]) {
-            TCGTemp *ts = &l->s->temps[idx];
-            if (ts->temp_global && strcmp(ts->name, "env") != 0) {
-                switch (ts->type) {
-#define FLUSH_TEMP(bits) \
-    ST( \
-        TRUNC(LD(l->temps[idx]), bits), \
-        II2P(env, CONST(ts->mem_offset), bits) \
-    )
-                case TCG_TYPE_I32: FLUSH_TEMP(32); break;
-                case TCG_TYPE_I64: FLUSH_TEMP(64); break;
-                default:
-                    tcg_abort();
-                }
+            sprintf(buf, "%s%d", 
+                ts->temp_local ? "loc" : "tmp",
+                idx - l->s->nb_globals);
+            switch (ts->type) {
+            case TCG_TYPE_I32: l->temps[idx] = ALLOCA(32, buf); break;
+            case TCG_TYPE_I64: l->temps[idx] = ALLOCA(64, buf); break;
+            default: tcg_abort();
             }
         }
+        return l->temps[idx];
     }
 #undef BLDR
 }
@@ -226,6 +210,8 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
     
     LLVMModuleRef mdl = LLVMModuleCreateWithNameInContext(tbname, l->ctx);
     l->fn = LLVMAddFunction(mdl, tbname, l->tbtype);
+    l->env = LLVMGetParam(l->fn, l->tbargs);
+    LLVMAddAttributeAtIndex(l->fn, 1 + l->tbargs, l->noalias);
     //LLVMSetFunctionCallConv(fn, LLVMFastCallConv);
     //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->noreturn);
     LLVMBasicBlockRef entry_bb, body_bb;
@@ -267,22 +253,23 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
 #define ARG2R  LD(ARG2L)
 #define ARG3R  LD(ARG3L)
 /* Const-value of op args */
-#define ARG0C  CONST(ARG0)
-#define ARG1C  CONST(ARG1)
-#define ARG2C  CONST(ARG2)
-#define ARG3C  CONST(ARG3)
+#define ARG0C  CONSTH(ARG0)
+#define ARG1C  CONSTH(ARG1)
+#define ARG2C  CONSTH(ARG2)
+#define ARG3C  CONSTH(ARG3)
 /* Basic block of op args */
 #define ARG0BB get_label(l, ARG0)
 #define ARG1BB get_label(l, ARG1)
 #define ARG2BB get_label(l, ARG2)
 #define ARG3BB get_label(l, ARG3)
 
-        case INDEX_op_discard: ST(DISCARD, ARG0L); break;
+        case INDEX_op_discard:
+            ST(LLVMGetUndef(ELETY(TYOF(ARG0L))), ARG0L);
+            break;
         
 #define OP_LD(src_bits, dst_bits, ext_kind) \
-    STZ( \
-        EXTEND(LD(II2P(ARG1R, ARG2C, src_bits)), src_bits, ext_kind), \
-        dst_bits, \
+    ST( \
+        CAST(LD(II2P(ARG1R, ARG2C, src_bits)), src_bits, dst_bits, ext_kind), \
         ARG0L \
     )
         case INDEX_op_ld8u_i32:   OP_LD( 8, 32, Z); break;
@@ -312,37 +299,39 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         case INDEX_op_st_i64:    OP_ST(64); break;
 #endif
 
-        case INDEX_op_mov_i32:  STZ32(ARG1R, ARG0L); break;
-        case INDEX_op_movi_i32: STZ32(ARG1C, ARG0L); break;
+        case INDEX_op_mov_i32:  ST(ARG1R, ARG0L); break;
+        case INDEX_op_movi_i32: ST(TRUNC(ARG1C, 32), ARG0L); break;
 #if HBITS == 64
-        case INDEX_op_mov_i64:  STZ64(ARG1R, ARG0L); break;
-        case INDEX_op_movi_i64: STZ64(ARG1C, ARG0L); break;
+        case INDEX_op_mov_i64:  ST(ARG1R, ARG0L); break;
+        case INDEX_op_movi_i64: ST(ARG1C, ARG0L); break;
 #endif
 
-        case INDEX_op_ext8s_i32:    STZ32(TSEXT(ARG0R,  8), ARG0L); break;
-        case INDEX_op_ext16s_i32:   STZ32(TSEXT(ARG0R, 16), ARG0L); break;
-        case INDEX_op_ext8u_i32:    STZ32(TZEXT(ARG0R,  8), ARG0L); break;
-        case INDEX_op_ext16u_i32:   STZ32(TZEXT(ARG0R, 16), ARG0L); break;
+        case INDEX_op_ext8s_i32:    ST(TSEXT(ARG0R,  8, 32), ARG0L); break;
+        case INDEX_op_ext16s_i32:   ST(TSEXT(ARG0R, 16, 32), ARG0L); break;
+        case INDEX_op_ext8u_i32:    ST(TZEXT(ARG0R,  8, 32), ARG0L); break;
+        case INDEX_op_ext16u_i32:   ST(TZEXT(ARG0R, 16, 32), ARG0L); break;
 
-        case INDEX_op_ext8s_i64:    STZ64(TSEXT(ARG0R,  8), ARG0L); break;
-        case INDEX_op_ext16s_i64:   STZ64(TSEXT(ARG0R, 16), ARG0L); break;
-        case INDEX_op_ext32s_i64:   STZ64(TSEXT(ARG0R, 32), ARG0L); break;
-        case INDEX_op_ext_i32_i64:  STZ64(TSEXT(ARG0R, 32), ARG0L); break;
-        case INDEX_op_ext8u_i64:    STZ64(TZEXT(ARG0R,  8), ARG0L); break;
-        case INDEX_op_ext16u_i64:   STZ64(TZEXT(ARG0R, 16), ARG0L); break;
-        case INDEX_op_ext32u_i64:   STZ64(TZEXT(ARG0R, 32), ARG0L); break;
-        case INDEX_op_extu_i32_i64: STZ64(TZEXT(ARG0R, 32), ARG0L); break;
+        case INDEX_op_ext8s_i64:    ST(TSEXT(ARG0R,  8, 64), ARG0L); break;
+        case INDEX_op_ext16s_i64:   ST(TSEXT(ARG0R, 16, 64), ARG0L); break;
+        case INDEX_op_ext32s_i64:   ST(TSEXT(ARG0R, 32, 64), ARG0L); break;
+        case INDEX_op_ext_i32_i64:  ST(TSEXT(ARG0R, 32, 64), ARG0L); break;
+        case INDEX_op_ext8u_i64:    ST(TZEXT(ARG0R,  8, 64), ARG0L); break;
+        case INDEX_op_ext16u_i64:   ST(TZEXT(ARG0R, 16, 64), ARG0L); break;
+        case INDEX_op_ext32u_i64:   ST(TZEXT(ARG0R, 32, 64), ARG0L); break;
+        case INDEX_op_extu_i32_i64: ST(TZEXT(ARG0R, 32, 64), ARG0L); break;
 
 
-#define OP_ARITH(bits, name) \
-    STZ( \
-        CAT(LLVMBuild, name)(l->bldr, ARG1R, ARG2R, ""), \
-        bits, \
+#define OP_ARITH(op) \
+    ST( \
+        CAT(LLVMBuild, op)(l->bldr, ARG1R, ARG2R, ""), \
         ARG0L \
     )
-        case INDEX_op_add_i64: OP_ARITH(64, Add); break;
-        case INDEX_op_sub_i64: OP_ARITH(64, Sub); break;
-        case INDEX_op_and_i64: OP_ARITH(64, And); break;
+        case INDEX_op_add_i32: OP_ARITH(Add); break;
+        case INDEX_op_sub_i32: OP_ARITH(Sub); break;
+        case INDEX_op_and_i32: OP_ARITH(And); break;
+        case INDEX_op_add_i64: OP_ARITH(Add); break;
+        case INDEX_op_sub_i64: OP_ARITH(Sub); break;
+        case INDEX_op_and_i64: OP_ARITH(And); break;
 
 
 #define OP_BRCOND(bits) \
@@ -365,9 +354,8 @@ do { \
 
 // XXX: memory barrier and endian swap
 #define OP_QEMU_LD_HELPER(src_bits, dst_bits, ext_kind) \
-    STZ( \
+    ST( \
         EXTEND(LD(I2P(ARG1R, src_bits)), src_bits, ext_kind), \
-        dst_bits, \
         ARG0L \
     )
 #define OP_QEMU_LD(bits) \
@@ -409,7 +397,6 @@ do { \
         case INDEX_op_goto_tb:
             break;
         case INDEX_op_exit_tb:
-            flush_temps(l);
             LLVMBuildRetVoid(l->bldr);
             break;
 #undef BLDR
@@ -448,13 +435,18 @@ void tcg_llvm_context_init(TCGContext *s)
 
     l->pm = LLVMCreatePassManager();
     LLVMAddPromoteMemoryToRegisterPass(l->pm);
+    LLVMAddBasicAliasAnalysisPass(l->pm);
     LLVMAddCFGSimplificationPass(l->pm);
     LLVMAddInstructionCombiningPass(l->pm);
     LLVMAddReassociatePass(l->pm);
+    LLVMAddInstructionCombiningPass(l->pm);
     LLVMAddGVNPass(l->pm);
+    LLVMAddInstructionCombiningPass(l->pm);
+    LLVMAddDeadStoreEliminationPass(l->pm);
 
 #define GET_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
     l->noreturn = LLVMCreateEnumAttribute(l->ctx, GET_KINDID("noreturn"), 0);
+    l->noalias = LLVMCreateEnumAttribute(l->ctx, GET_KINDID("noalias"), 0);
 #undef GET_KINDID
 
 
@@ -467,7 +459,7 @@ void tcg_llvm_context_init(TCGContext *s)
         for (i = 0; i < l->tbargs; i++) {
             args[i] = INTTY(GBITS);
         }
-        args[l->tbargs] = INTTY(HBITS);
+        args[l->tbargs] = PTRTY(INTTY(8));
         l->tbtype = LLVMFunctionType(LLVMVoidTypeInContext(l->ctx), args, nargs, 0);
     }
 }

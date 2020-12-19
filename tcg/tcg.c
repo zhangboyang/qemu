@@ -2031,7 +2031,7 @@ static void tcg_dump_ops(TCGContext *s, bool have_prefs)
                             tcg_find_helper(s, op->args[nb_oargs + nb_iargs]),
                             op->args[nb_oargs + nb_iargs + 1], nb_oargs);
             for (i = 0; i < nb_oargs; i++) {
-                col += qemu_log(",%s", tcg_get_arg_str(s, buf, sizeof(buf),
+                col += qemu_log(",O%s", tcg_get_arg_str(s, buf, sizeof(buf),
                                                        op->args[i]));
             }
             for (i = 0; i < nb_iargs; i++) {
@@ -2040,7 +2040,7 @@ static void tcg_dump_ops(TCGContext *s, bool have_prefs)
                 if (arg != TCG_CALL_DUMMY_ARG) {
                     t = tcg_get_arg_str(s, buf, sizeof(buf), arg);
                 }
-                col += qemu_log(",%s", t);
+                col += qemu_log(",I%s", t);
             }
         } else {
             col += qemu_log(" %s ", def->name);
