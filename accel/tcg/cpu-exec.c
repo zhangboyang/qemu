@@ -41,6 +41,8 @@
 #include "sysemu/cpu-timers.h"
 #include "sysemu/replay.h"
 
+#include <sys/syscall.h>
+
 /* -icount align implementation. */
 
 typedef struct SyncClocks {
@@ -175,30 +177,87 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
     }
 #endif /* DEBUG_DISAS */
 
-    fprintf(stderr,"BEFORE tb pc=%016llX\n", (unsigned long long)itb->pc);
-    for (int i = 0; i < 32; i++) {
-        unsigned long long *p = (void*)env;
-        fprintf(stderr,"%016llX ", p[i]);
-        if ((i + 1) % 4 == 0) fprintf(stderr,"\n");
+    long pid;
+    int showreg = 0;
+    if (showreg) {
+        fprintf(stderr,"BEFORE tb pc=%016llx\n", (unsigned long long)itb->pc);
+        for (int i = 0; i < 32; i++) {
+            unsigned long long *p = (void*)env;
+            fprintf(stderr,"%016llX ", p[i]);
+            if ((i + 1) % 4 == 0) fprintf(stderr,"\n");
+        }
     }
-    memcpy((void *)0x666600000000, env, 32*8);
 #ifdef CONFIG_TCG_LLVM
+    int regdiff = 0;
     if (itb->llvm_tc) {
-        fprintf(stderr, "llvm_tc = %p\n", itb->llvm_tc);
-        ret = ((uintptr_t (*)(void *))itb->llvm_tc)(env);
-        
+        //fprintf(stderr, "llvm_tc = %p\n", itb->llvm_tc);
+        if (1) {
+            ret = ((uintptr_t (*)(void *))itb->llvm_tc)(env);
+        }
+        if (0) {
+            ret = tcg_qemu_tb_exec(env, tb_ptr);
+        }
+        if (0) {
+            
+            unlink("cpustate");
+            pid = syscall(SYS_fork);
+            if (pid == 0) {
+                void x(int z) {
+                    if (write(2, "crash! attach gdb?\n",19)){}
+                    char t;
+                    if (read(0, &t, 1)){}
+                    exit(0);
+                }
+                signal(SIGSEGV, x);
+                signal(SIGFPE, x);
+                ret = ((uintptr_t (*)(void *))itb->llvm_tc)(env);
+                FILE *fp = fopen("cpustate", "wb");
+                if (!fp) {
+                    fprintf(stderr,"fp?????\n");
+                    exit(0);
+                }
+                fwrite(env, sizeof(*env), 1, fp);
+                fclose(fp);
+                exit(0);
+            } else {
+                fprintf(stderr, "child pid=%ld\n", pid);
+                ret = tcg_qemu_tb_exec(env, tb_ptr);
+                waitpid(pid, NULL, 0);
+                FILE *fp = fopen("cpustate", "rb");
+                if (!fp) {
+                    fprintf(stderr,"child died! exit!\n");
+                    exit(0);
+                }
+                CPUArchState child_env;
+                if (fread(&child_env, sizeof(*env), 1, fp) != 1) tcg_abort();
+                fclose(fp);
+                fprintf(stderr,"AFTER CHILD tb pc=%016llX\n", (unsigned long long)itb->pc);
+                if (showreg) {
+                    for (int i = 0; i < 32; i++) {
+                        unsigned long long *p = (void*)&child_env;
+                        fprintf(stderr,"%016llX ", p[i]);
+                        if ((i + 1) % 4 == 0) fprintf(stderr,"\n");
+                    }
+                }
+                regdiff=memcmp(env, &child_env, 8*32);
+                fprintf(stderr, "%s\n", regdiff ? "REGDIFF":"REGSAME");
+            }
+        }
     } else {
         ret = tcg_qemu_tb_exec(env, tb_ptr);
     }
 #else
     ret = tcg_qemu_tb_exec(env, tb_ptr);
 #endif
-    fprintf(stderr,"AFTER tb pc=%016llX\n", (unsigned long long)itb->pc);
-    for (int i = 0; i < 32; i++) {
-        unsigned long long *p = (void*)env;
-        fprintf(stderr,"%016llX ", p[i]);
-        if ((i + 1) % 4 == 0) fprintf(stderr,"\n");
+    if (showreg) {
+        fprintf(stderr,"AFTER tb pc=%016llX\n", (unsigned long long)itb->pc);
+        for (int i = 0; i < 32; i++) {
+            unsigned long long *p = (void*)env;
+            fprintf(stderr,"%016llX ", p[i]);
+            if ((i + 1) % 4 == 0) fprintf(stderr,"\n");
+        }
     }
+    if (regdiff) exit(0);
 
     cpu->can_do_io = 1;
     last_tb = (TranslationBlock *)(ret & ~TB_EXIT_MASK);

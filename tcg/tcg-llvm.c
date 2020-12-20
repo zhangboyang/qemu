@@ -343,20 +343,20 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         case INDEX_op_movi_i64: ST(ARG1C, ARG0L); break;
 #endif
 
-        case INDEX_op_ext8s_i32:    ST(TSEXT(ARG0R,  8, 32), ARG0L); break;
-        case INDEX_op_ext16s_i32:   ST(TSEXT(ARG0R, 16, 32), ARG0L); break;
-        case INDEX_op_ext8u_i32:    ST(TZEXT(ARG0R,  8, 32), ARG0L); break;
-        case INDEX_op_ext16u_i32:   ST(TZEXT(ARG0R, 16, 32), ARG0L); break;
+        case INDEX_op_ext8s_i32:    ST(TSEXT(ARG1R,  8, 32), ARG0L); break;
+        case INDEX_op_ext16s_i32:   ST(TSEXT(ARG1R, 16, 32), ARG0L); break;
+        case INDEX_op_ext8u_i32:    ST(TZEXT(ARG1R,  8, 32), ARG0L); break;
+        case INDEX_op_ext16u_i32:   ST(TZEXT(ARG1R, 16, 32), ARG0L); break;
 
 #if HBITS == 64
-        case INDEX_op_ext8s_i64:    ST(TSEXT(ARG0R,  8, 64), ARG0L); break;
-        case INDEX_op_ext16s_i64:   ST(TSEXT(ARG0R, 16, 64), ARG0L); break;
-        case INDEX_op_ext32s_i64:   ST(TSEXT(ARG0R, 32, 64), ARG0L); break;
-        case INDEX_op_ext_i32_i64:  ST(TSEXT(ARG0R, 32, 64), ARG0L); break;
-        case INDEX_op_ext8u_i64:    ST(TZEXT(ARG0R,  8, 64), ARG0L); break;
-        case INDEX_op_ext16u_i64:   ST(TZEXT(ARG0R, 16, 64), ARG0L); break;
-        case INDEX_op_ext32u_i64:   ST(TZEXT(ARG0R, 32, 64), ARG0L); break;
-        case INDEX_op_extu_i32_i64: ST(TZEXT(ARG0R, 32, 64), ARG0L); break;
+        case INDEX_op_ext8s_i64:    ST(TSEXT(ARG1R,  8, 64), ARG0L); break;
+        case INDEX_op_ext16s_i64:   ST(TSEXT(ARG1R, 16, 64), ARG0L); break;
+        case INDEX_op_ext32s_i64:   ST(TSEXT(ARG1R, 32, 64), ARG0L); break;
+        case INDEX_op_ext_i32_i64:  ST(TSEXT(ARG1R, 32, 64), ARG0L); break;
+        case INDEX_op_ext8u_i64:    ST(TZEXT(ARG1R,  8, 64), ARG0L); break;
+        case INDEX_op_ext16u_i64:   ST(TZEXT(ARG1R, 16, 64), ARG0L); break;
+        case INDEX_op_ext32u_i64:   ST(TZEXT(ARG1R, 32, 64), ARG0L); break;
+        case INDEX_op_extu_i32_i64: ST(TZEXT(ARG1R, 32, 64), ARG0L); break;
 #endif
 
 
@@ -409,7 +409,7 @@ do { \
 
 #define OP_DEPOSIT(bits) \
 do { \
-    unsigned long long x = (1LL << ARG4) << ARG3; \
+    unsigned long long x = ((1LL << ARG4) - 1) << ARG3; \
     ST( \
         OR( \
             AND(ARG1R, CONST(bits, ~x)), \
@@ -443,7 +443,7 @@ do { \
     ST( \
         call_intrinsic(l, "llvm.fshr", \
             INTTY(bits), NULL, \
-            ARG1R, ARG2R, CONST(bits, ARG3), NULL \
+            ARG2R, ARG1R, CONST(bits, ARG3), NULL \
         ), \
         ARG0L \
     )
@@ -526,8 +526,8 @@ do { \
 #define OP_MOVCOND(bits) \
     ST( \
         LLVMBuildSelect(BLDR, \
-            INTCMP(ARG3R, ARG4R, ARG5), \
-            ARG1R, ARG2R, \
+            INTCMP(ARG1R, ARG2R, ARG5), \
+            ARG3R, ARG4R, \
             "" \
         ), \
         ARG0L \
@@ -595,7 +595,6 @@ do { \
             if (nb_oargs > 1) {
                 tcg_abort();
             }
-            printf("%d %d\n", nb_iargs, nb_oargs);
             
             for (i = 0; i < nb_iargs; i++) {
                 LLVMValueRef lval = get_lvalue(l, op->args[nb_oargs + i]);
@@ -637,10 +636,10 @@ do { \
     }
 
     
-    dump_module(l->mod);
+    //dump_module(l->mod);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
-    //LLVMRunPassManager(l->pm, l->mod);
+    LLVMRunPassManager(l->pm, l->mod);
     //dump_module(l->mod);
 
 
@@ -650,8 +649,8 @@ do { \
 
     LLVMOrcJITTargetAddress addr;
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, tbname));
-    printf("%s = %p\n", tbname, (void *)addr);
-    log_disas((void *)addr, 200);
+    //printf("%s = %p\n", tbname, (void *)addr);
+    //log_disas((void *)addr, 200);
     tb->llvm_tc = (void *)addr;
 }
 

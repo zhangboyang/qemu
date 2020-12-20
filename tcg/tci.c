@@ -1206,6 +1206,7 @@ uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr)
             if (TCG_TARGET_REG_BITS == 32) {
                 tci_write_reg(regs, t1, tmp64 >> 32);
             }
+            fprintf(stderr, "INDEX_op_qemu_ld_i64=%016lX\n", tmp64);
             break;
         case INDEX_op_qemu_st_i32:
             t0 = tci_read_r(regs, &tb_ptr);
