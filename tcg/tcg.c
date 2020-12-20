@@ -999,7 +999,9 @@ void tcg_context_init(TCGContext *s)
 
     alloc_tcg_plugin_context(s);
 
+#ifdef CONFIG_TCG_LLVM
     tcg_llvm_context_init(s);
+#endif
 
     tcg_ctx = s;
     /*

@@ -30,6 +30,7 @@
 #include <sys/un.h>
 #include <stdio.h>
 #include <errno.h>
+#include <sys/mman.h>
 
 #include <qemu-plugin.h>
 
@@ -58,6 +59,7 @@ typedef struct {
 typedef struct {
     uint64_t pc;
     unsigned long insn_count;
+    char xxx[32*8];
 } ExecState;
 
 typedef struct {
@@ -171,6 +173,7 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
 
     us.pc = bi->pc;
     us.insn_count = insn_count;
+    memcpy(us.xxx, (void *)0x666600000000, sizeof(us.xxx));
 
     /*
      * Write our current position to the other end. If we fail the
@@ -201,6 +204,11 @@ static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
     /*
      * Compare and report if we have diverged.
      */
+    if (memcmp(us.xxx, them.xxx, sizeof(us.xxx)) != 0) {
+        fprintf(stderr, "REGDIFF! PC=%016llx\n", (unsigned long long) us.pc);
+    } else {
+        fprintf(stderr, "REGSAME! PC=%016llx\n", (unsigned long long) us.pc);
+    }
     if (us.pc != them.pc) {
         report_divergance(&us, &them);
     }
@@ -319,6 +327,11 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
                                            int argc, char **argv)
 {
     int i;
+
+    //super dirty hack
+    void *xxx = mmap((void *) 0x666600000000, 4096, PROT_WRITE | PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED, -1, 0);
+    printf("xxx=%p\n", xxx);
+    if (xxx==(void *) -1) perror("xxx");
 
     if (!argc || !argv[0]) {
         qemu_plugin_outs("Need a socket path to talk to other instance.");

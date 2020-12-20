@@ -175,7 +175,31 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
     }
 #endif /* DEBUG_DISAS */
 
+    fprintf(stderr,"BEFORE tb pc=%016llX\n", (unsigned long long)itb->pc);
+    for (int i = 0; i < 32; i++) {
+        unsigned long long *p = (void*)env;
+        fprintf(stderr,"%016llX ", p[i]);
+        if ((i + 1) % 4 == 0) fprintf(stderr,"\n");
+    }
+    memcpy((void *)0x666600000000, env, 32*8);
+#ifdef CONFIG_TCG_LLVM
+    if (itb->llvm_tc) {
+        fprintf(stderr, "llvm_tc = %p\n", itb->llvm_tc);
+        ret = ((uintptr_t (*)(void *))itb->llvm_tc)(env);
+        
+    } else {
+        ret = tcg_qemu_tb_exec(env, tb_ptr);
+    }
+#else
     ret = tcg_qemu_tb_exec(env, tb_ptr);
+#endif
+    fprintf(stderr,"AFTER tb pc=%016llX\n", (unsigned long long)itb->pc);
+    for (int i = 0; i < 32; i++) {
+        unsigned long long *p = (void*)env;
+        fprintf(stderr,"%016llX ", p[i]);
+        if ((i + 1) % 4 == 0) fprintf(stderr,"\n");
+    }
+
     cpu->can_do_io = 1;
     last_tb = (TranslationBlock *)(ret & ~TB_EXIT_MASK);
     tb_exit = ret & TB_EXIT_MASK;

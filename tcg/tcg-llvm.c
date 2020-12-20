@@ -259,7 +259,7 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         c = op->opc;
         def = &tcg_op_defs[c];
 
-        printf(">>%s\n", def->name);
+        //printf(">>%s\n", def->name);
 
         switch (c) {
 #define BLDR (l->bldr)
@@ -583,7 +583,7 @@ do { \
             break;
 
         case INDEX_op_call: {
-            int i, nb_oargs, nb_iargs, nb_cargs;
+            int i, nb_oargs, nb_iargs;
             LLVMTypeRef ret_ty;
             LLVMTypeRef args_ty[MAX_OPC_PARAM_IARGS];
             LLVMTypeRef fn_ty;
@@ -592,11 +592,10 @@ do { \
 
             nb_oargs = TCGOP_CALLO(op);
             nb_iargs = TCGOP_CALLI(op);
-            nb_cargs = def->nb_cargs;
-            printf("%d %d %d\n", nb_oargs, nb_iargs, nb_cargs);
             if (nb_oargs > 1) {
                 tcg_abort();
             }
+            printf("%d %d\n", nb_iargs, nb_oargs);
             
             for (i = 0; i < nb_iargs; i++) {
                 LLVMValueRef lval = get_lvalue(l, op->args[nb_oargs + i]);
@@ -605,7 +604,6 @@ do { \
             }
             
             ret_ty = nb_oargs ? ELETY(TYOF(ARG0L)) : VOIDTY;
-            args_ty[l->tbargs] = PTRTY(INTTY(8));
             fn_ty = LLVMFunctionType(ret_ty, args_ty, nb_iargs, 0);
             fn = LLVMBuildIntToPtr(BLDR,
                 CONSTH(op->args[nb_oargs + nb_iargs]),
@@ -629,9 +627,10 @@ do { \
         case INDEX_op_goto_tb:
             break;
         case INDEX_op_goto_ptr:
+            LLVMBuildRet(BLDR, CONST(HBITS, (unsigned long long)tb));
             break;
         case INDEX_op_exit_tb:
-            LLVMBuildRetVoid(BLDR);
+            LLVMBuildRet(BLDR, ARG0C);
             break;
 #undef BLDR
         }
@@ -641,17 +640,19 @@ do { \
     dump_module(l->mod);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
-    LLVMRunPassManager(l->pm, l->mod);
-    dump_module(l->mod);
+    //LLVMRunPassManager(l->pm, l->mod);
+    //dump_module(l->mod);
 
 
-    LLVMOrcThreadSafeModuleRef tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
+    LLVMOrcThreadSafeModuleRef tsm;
+    tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
     LLVMOrcJITTargetAddress addr;
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, tbname));
     printf("%s = %p\n", tbname, (void *)addr);
     log_disas((void *)addr, 200);
+    tb->llvm_tc = (void *)addr;
 }
 
 void tcg_llvm_context_init(TCGContext *s)
@@ -685,7 +686,7 @@ void tcg_llvm_context_init(TCGContext *s)
 
 
     
-    l->tbargs = 4;
+    l->tbargs = 0;
     {
         int nargs = l->tbargs + 1;
         LLVMTypeRef args[nargs];
@@ -694,7 +695,7 @@ void tcg_llvm_context_init(TCGContext *s)
             args[i] = INTTY(GBITS);
         }
         args[l->tbargs] = PTRTY(INTTY(8));
-        l->tbtype = LLVMFunctionType(VOIDTY, args, nargs, 0);
+        l->tbtype = LLVMFunctionType(INTTY(HBITS), args, nargs, 0);
     }
 }
 

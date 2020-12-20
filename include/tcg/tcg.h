@@ -268,7 +268,9 @@ struct TCGLabel {
     } u;
     QSIMPLEQ_HEAD(, TCGRelocation) relocs;
     QSIMPLEQ_ENTRY(TCGLabel) next;
+#ifdef CONFIG_TCG_LLVM
     LLVMBasicBlockRef llvm_bb;
+#endif
 };
 
 typedef struct TCGPool {

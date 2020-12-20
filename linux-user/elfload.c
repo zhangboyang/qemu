@@ -3168,6 +3168,7 @@ int load_elf_binary(struct linux_binprm *bprm, struct image_info *info)
     bprm->p = create_elf_tables(bprm->p, bprm->argc, bprm->envc, &elf_ex,
                                 info, (elf_interpreter ? &interp_info : NULL));
     info->start_stack = bprm->p;
+    printf("info->start_stack=%p\n", (void*)info->start_stack);
 
     /* If we have an interpreter, set that as the program's entry point.
        Copy the load_bias as well, to help PPC64 interpret the entry

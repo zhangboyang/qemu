@@ -476,6 +476,9 @@ struct TranslationBlock {
     uint32_t trace_vcpu_dstate;
 
     struct tb_tc tc;
+#ifdef CONFIG_TCG_LLVM
+    void *llvm_tc;
+#endif
 
     /* original tb when cflags has CF_NOCACHE */
     struct TranslationBlock *orig_tb;

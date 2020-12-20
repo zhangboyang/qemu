@@ -1727,6 +1727,9 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = gen_code_buf;
+#ifdef CONFIG_TCG_LLVM
+    tb->llvm_tc = NULL;
+#endif
     tb->pc = pc;
     tb->cs_base = cs_base;
     tb->flags = flags;
