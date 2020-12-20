@@ -27,6 +27,7 @@ typedef struct TCGLLVMContext {
 
     /* Temporary values */
     LLVMValueRef temps[TCG_MAX_TEMPS];
+    LLVMModuleRef mod;
     LLVMValueRef fn;
     LLVMValueRef env;
 } TCGLLVMContext;
