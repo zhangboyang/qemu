@@ -1,3 +1,12 @@
+/*
+ * QEMU TCG JIT using LLVM
+ *
+ * Copyright (C) 2020, Zhang Boyang <zhangboyang.id@gmail.com>
+ *
+ * License: GNU GPL, version 2 or later.
+ *   See the COPYING file in the top-level directory.
+ */
+
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "exec/exec-all.h"
@@ -51,7 +60,12 @@
 #define LD(ptr) LLVMBuildLoad(BLDR, ptr, "")
 #define ST(val, ptr) LLVMBuildStore(BLDR, val, ptr)
 
-/* Bit Op */
+/* Arith Ops */
+#define ADD(x, y) LLVMBuildAdd(BLDR, x, y, "")
+#define SUB(x, y) LLVMBuildSub(BLDR, x, y, "")
+#define MUL(x, y) LLVMBuildMul(BLDR, x, y, "")
+#define DIV(x, y, div_kind) CAT3(LLVMBuild, div_kind, Div)(BLDR, x, y, "")
+#define REM(x, y, div_kind) CAT3(LLVMBuild, div_kind, Rem)(BLDR, x, y, "")
 #define AND(x, y) LLVMBuildAnd(BLDR, x, y, "")
 #define OR(x, y) LLVMBuildOr(BLDR, x, y, "")
 #define SHL(x, y) LLVMBuildShl(BLDR, x, y, "")
@@ -66,13 +80,14 @@
 #define BR(dst) LLVMBuildBr(BLDR, dst)
 #define CONDBR(i1, t, f) LLVMBuildCondBr(BLDR, i1, t, f)
 #define INTCMP(x, y, tcg_cond) LLVMBuildICmp(BLDR, map_cond(tcg_cond), x, y, "")
+#define SELECT(cond, t, f) LLVMBuildSelect(BLDR, cond, t, f, "")
 #define CMPBR(x, y, tcg_cond, t, f) CONDBR(INTCMP(x, y, tcg_cond), t, f)
 
 /* Convert pointers */
 #define P2I(p) LLVMBuildPtrToInt(BLDR, p, INTTY(HBITS), "")
 #define I2P(i, bits) LLVMBuildIntToPtr(BLDR, i, PTRTY(INTTY(bits)), "")
 /* Convert integer+offset to pointer */
-#define II2P(i1, i2, bits) I2P(LLVMBuildAdd(BLDR, i1, i2, ""), bits)
+#define II2P(i1, i2, bits) I2P(ADD(i1, i2), bits)
 #define PI2P(p, i, bits) II2P(P2I(p), i, bits)
 
 /* Extend or truncate integers */
@@ -120,8 +135,14 @@ static inline void dump_module(LLVMModuleRef mdl)
     LLVMDisposeMessage(str);
 }
 
-
-static inline LLVMValueRef call_intrinsic(TCGLLVMContext *l, const char *name, ...)
+/* Build a call to llvm intrinsic
+ *  call_intrinsic(l,
+ *      "llvm.foo.bar",
+ *      [Overload types], NULL,
+ *      [Arg values], NULL
+ *  );
+ */
+static LLVMValueRef call_intrinsic(TCGLLVMContext *l, const char *name, ...)
 {
 #define MAX_INTRINSIC_ARGS 10
     va_list ap;
@@ -299,16 +320,16 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
 #define ARG3BB get_label(l, ARG3)
 #define ARG4BB get_label(l, ARG4)
 #define ARG5BB get_label(l, ARG5)
+/* store to op args */
+#define ST0(v) ST(v, ARG0L)
+#define ST1(v) ST(v, ARG1L)
 
         case INDEX_op_discard:
-            ST(LLVMGetUndef(ELETY(TYOF(ARG0L))), ARG0L);
+            ST0(LLVMGetUndef(ELETY(TYOF(ARG0L))));
             break;
         
 #define OP_LD(src_bits, dst_bits, ext_kind) \
-    ST( \
-        EXTEND(LD(II2P(ARG1R, ARG2C, src_bits)), dst_bits, ext_kind), \
-        ARG0L \
-    )
+    ST0(EXTEND(LD(II2P(ARG1R, ARG2C, src_bits)), dst_bits, ext_kind))
         case INDEX_op_ld8u_i32:   OP_LD( 8, 32, Z); break;
         case INDEX_op_ld8s_i32:   OP_LD( 8, 32, S); break;
         case INDEX_op_ld16u_i32:  OP_LD(16, 32, Z); break;
@@ -336,86 +357,132 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         case INDEX_op_st_i64:    OP_ST(64); break;
 #endif
 
-        case INDEX_op_mov_i32:  ST(TRUNC(ARG1R, 32), ARG0L); break;
-        case INDEX_op_movi_i32: ST(TRUNC(ARG1C, 32), ARG0L); break;
+        case INDEX_op_mov_i32:  ST0(TRUNC(ARG1R, 32)); break;
+        case INDEX_op_movi_i32: ST0(TRUNC(ARG1C, 32)); break;
 #if HBITS == 64
-        case INDEX_op_mov_i64:  ST(ARG1R, ARG0L); break;
-        case INDEX_op_movi_i64: ST(ARG1C, ARG0L); break;
+        case INDEX_op_mov_i64:  ST0(ARG1R); break;
+        case INDEX_op_movi_i64: ST0(ARG1C); break;
 #endif
 
-        case INDEX_op_ext8s_i32:    ST(TSEXT(ARG1R,  8, 32), ARG0L); break;
-        case INDEX_op_ext16s_i32:   ST(TSEXT(ARG1R, 16, 32), ARG0L); break;
-        case INDEX_op_ext8u_i32:    ST(TZEXT(ARG1R,  8, 32), ARG0L); break;
-        case INDEX_op_ext16u_i32:   ST(TZEXT(ARG1R, 16, 32), ARG0L); break;
+        case INDEX_op_ext8s_i32:    ST0(TSEXT(ARG1R,  8, 32)); break;
+        case INDEX_op_ext16s_i32:   ST0(TSEXT(ARG1R, 16, 32)); break;
+        case INDEX_op_ext8u_i32:    ST0(TZEXT(ARG1R,  8, 32)); break;
+        case INDEX_op_ext16u_i32:   ST0(TZEXT(ARG1R, 16, 32)); break;
 
 #if HBITS == 64
-        case INDEX_op_ext8s_i64:    ST(TSEXT(ARG1R,  8, 64), ARG0L); break;
-        case INDEX_op_ext16s_i64:   ST(TSEXT(ARG1R, 16, 64), ARG0L); break;
-        case INDEX_op_ext32s_i64:   ST(TSEXT(ARG1R, 32, 64), ARG0L); break;
-        case INDEX_op_ext_i32_i64:  ST(TSEXT(ARG1R, 32, 64), ARG0L); break;
-        case INDEX_op_ext8u_i64:    ST(TZEXT(ARG1R,  8, 64), ARG0L); break;
-        case INDEX_op_ext16u_i64:   ST(TZEXT(ARG1R, 16, 64), ARG0L); break;
-        case INDEX_op_ext32u_i64:   ST(TZEXT(ARG1R, 32, 64), ARG0L); break;
-        case INDEX_op_extu_i32_i64: ST(TZEXT(ARG1R, 32, 64), ARG0L); break;
+        case INDEX_op_ext8s_i64:    ST0(TSEXT(ARG1R,  8, 64)); break;
+        case INDEX_op_ext16s_i64:   ST0(TSEXT(ARG1R, 16, 64)); break;
+        case INDEX_op_ext32s_i64:   ST0(TSEXT(ARG1R, 32, 64)); break;
+        case INDEX_op_ext_i32_i64:  ST0(TSEXT(ARG1R, 32, 64)); break;
+        case INDEX_op_ext8u_i64:    ST0(TZEXT(ARG1R,  8, 64)); break;
+        case INDEX_op_ext16u_i64:   ST0(TZEXT(ARG1R, 16, 64)); break;
+        case INDEX_op_ext32u_i64:   ST0(TZEXT(ARG1R, 32, 64)); break;
+        case INDEX_op_extu_i32_i64: ST0(TZEXT(ARG1R, 32, 64)); break;
 #endif
 
 
-#define OP_ARITH2(op) \
-    ST( \
-        CAT(LLVMBuild, op)(BLDR, ARG1R, ARG2R, ""), \
-        ARG0L \
+#define OP_ARITH2(op2) \
+    ST0(CAT(LLVMBuild, op2)(BLDR, ARG1R, ARG2R, ""))
+#define OP_ARITH1(op1) \
+    ST0(CAT(LLVMBuild, op1)(BLDR, ARG1R, ""))
+#define OP_ARITH12(op1, op2) \
+    ST0( \
+        CAT(LLVMBuild, op1)(BLDR, \
+            CAT(LLVMBuild, op2)(BLDR, ARG1R, ARG2R, ""), \
+            "" \
+        ) \
     )
-#define OP_ARITH1(op) \
-    ST( \
-        CAT(LLVMBuild, op)(BLDR, ARG1R, ""), \
-        ARG0L \
+#define OP_ARITH21(op2, op1) \
+    ST0( \
+        CAT(LLVMBuild, op2)(BLDR, \
+            ARG1R, \
+            CAT(LLVMBuild, op1)(BLDR, ARG2R, ""), \
+            "" \
+        ) \
     )
 #if HBITS == 64
-#define MAKE_ARITH(arith, tcg_op, llvm_op) \
-    case CAT3(INDEX_op_, tcg_op, _i32): arith(llvm_op); break; \
-    case CAT3(INDEX_op_, tcg_op, _i64): arith(llvm_op); break;
+#define CASE_ARITH(tcg_op, stmt) \
+    case CAT3(INDEX_op_, tcg_op, _i32): stmt; break; \
+    case CAT3(INDEX_op_, tcg_op, _i64): stmt; break;
 #else
-#define MAKE_ARITH(tcg_op, llvm_op) \
-    case CAT3(INDEX_op_, tcg_op, _i32): arith(llvm_op); break;
+#define CASE_ARITH(tcg_op, stmt) \
+    case CAT3(INDEX_op_, tcg_op, _i32): stmt; break;
 #endif
-        MAKE_ARITH(OP_ARITH2, add, Add )
-        MAKE_ARITH(OP_ARITH2, sub, Sub )
-        MAKE_ARITH(OP_ARITH1, neg, Neg )
-        MAKE_ARITH(OP_ARITH2, mul, Mul )
-        MAKE_ARITH(OP_ARITH2, and, And )
-        MAKE_ARITH(OP_ARITH2, or , Or  )
-        MAKE_ARITH(OP_ARITH2, xor, Xor )
-        MAKE_ARITH(OP_ARITH2, shl, Shl )
-        MAKE_ARITH(OP_ARITH2, shr, LShr)
-        MAKE_ARITH(OP_ARITH2, sar, AShr)
-        MAKE_ARITH(OP_ARITH1, not, Not)
+        CASE_ARITH(add, OP_ARITH2(Add))
+        CASE_ARITH(sub, OP_ARITH2(Sub))
+        CASE_ARITH(neg, OP_ARITH1(Neg))
+        CASE_ARITH(mul, OP_ARITH2(Mul))
+        CASE_ARITH(and, OP_ARITH2(And))
+        CASE_ARITH(or , OP_ARITH2(Or))
+        CASE_ARITH(xor, OP_ARITH2(Xor))
+        CASE_ARITH(shl, OP_ARITH2(Shl))
+        CASE_ARITH(shr, OP_ARITH2(LShr))
+        CASE_ARITH(sar, OP_ARITH2(AShr))
+        CASE_ARITH(not, OP_ARITH1(Not))
+        CASE_ARITH(andc, OP_ARITH21(And, Not))
 
-#define OP_MUL(bits, bits2, ext_kind) \
+#define OP_MUL2(bits, bits2x, mul_kind) \
 do { \
-    LLVMValueRef product = LLVMBuildMul(BLDR, \
-        EXTEND(ARG2R, bits2, ext_kind), \
-        EXTEND(ARG3R, bits2, ext_kind), \
-        "" \
+    LLVMValueRef product = MUL( \
+        EXTEND(ARG2R, bits2x, mul_kind), \
+        EXTEND(ARG3R, bits2x, mul_kind) \
     ); \
-    ST(TRUNC(product, bits), ARG0L); \
-    ST(TRUNC(LSHR(product, CONST(bits2, bits)), bits), ARG1L); \
+    ST0(TRUNC(product, bits)); \
+    ST1(TRUNC(LSHR(product, CONST(bits2x, bits)), bits)); \
 } while (0)
-        case INDEX_op_mulu2_i32:  OP_MUL(32, 64, Z); break;
-        case INDEX_op_muls2_i32:  OP_MUL(32, 64, S); break;
+        case INDEX_op_mulu2_i32:  OP_MUL2(32, 64, Z); break;
+        case INDEX_op_muls2_i32:  OP_MUL2(32, 64, S); break;
 #if HBITS == 64
-        case INDEX_op_mulu2_i64:  OP_MUL(64, 128, Z); break;
-        case INDEX_op_muls2_i64:  OP_MUL(64, 128, S); break;
+        case INDEX_op_mulu2_i64:  OP_MUL2(64, 128, Z); break;
+        case INDEX_op_muls2_i64:  OP_MUL2(64, 128, S); break;
+#endif
+
+#define OP_DIV2(bits, bits2x, div_kind) \
+do { \
+    LLVMValueRef a = OR( \
+        ZEXT(ARG2R, bits2x), \
+        SHL(ZEXT(ARG3R, bits2x), CONST(bits2x, bits)) \
+    ); \
+    LLVMValueRef b = ZEXT(ARG4R, bits2x); \
+    ST0(TRUNC(DIV(a, b, div_kind), bits)); \
+    ST1(TRUNC(REM(a, b, div_kind), bits)); \
+} while (0)
+        case INDEX_op_divu2_i32:  OP_DIV2(32, 64, U); break;
+        case INDEX_op_div2_i32:   OP_DIV2(32, 64, S); break;
+#if HBITS == 64
+        case INDEX_op_divu2_i64:  OP_DIV2(64, 128, U); break;
+        case INDEX_op_div2_i64:   OP_DIV2(64, 128, S); break;
+#endif
+
+#define OP_ADDSUB2(op, bits, bits2x) \
+do { \
+    LLVMValueRef a = OR( \
+        ZEXT(ARG2R, bits2x), \
+        SHL(ZEXT(ARG3R, bits2x), CONST(bits2x, bits)) \
+    ); \
+    LLVMValueRef b = OR( \
+        ZEXT(ARG4R, bits2x), \
+        SHL(ZEXT(ARG5R, bits2x), CONST(bits2x, bits)) \
+    ); \
+    LLVMValueRef result = op(a, b); \
+    ST0(TRUNC(result, bits)); \
+    ST1(TRUNC(LSHR(result, CONST(bits2x, bits)), bits)); \
+} while (0)
+        case INDEX_op_add2_i32:  OP_ADDSUB2(ADD, 32, 64); break;
+        case INDEX_op_sub2_i32:  OP_ADDSUB2(SUB, 32, 64); break;
+#if HBITS == 64
+        case INDEX_op_add2_i64:  OP_ADDSUB2(ADD, 64, 128); break;
+        case INDEX_op_sub2_i64:  OP_ADDSUB2(SUB, 64, 128); break;
 #endif
 
 #define OP_DEPOSIT(bits) \
 do { \
-    unsigned long long x = ((1LL << ARG4) - 1) << ARG3; \
-    ST( \
+    unsigned long long mask = ((1LL << ARG4) - 1) << ARG3; \
+    ST0( \
         OR( \
-            AND(ARG1R, CONST(bits, ~x)), \
-            AND(SHL(ARG2R, CONST(bits, ARG3)), CONST(bits, x)) \
-        ), \
-        ARG0L \
+            AND(ARG1R, CONST(bits, ~mask)), \
+            AND(SHL(ARG2R, CONST(bits, ARG3)), CONST(bits, mask)) \
+        ) \
     ); \
 } while (0)
         case INDEX_op_deposit_i32:  OP_DEPOSIT(32); break;
@@ -424,13 +491,12 @@ do { \
 #endif
 
 #define OP_EXTRACT(bits, shr_kind) \
-    ST( \
+    ST0( \
         SHR(\
             SHL(ARG1R, CONST(bits, bits - ARG2 - ARG3)), \
             CONST(bits, bits - ARG3), \
             shr_kind \
-        ), \
-        ARG0L \
+        ) \
     )
         case INDEX_op_extract_i32:  OP_EXTRACT(32, L); break;
         case INDEX_op_sextract_i32: OP_EXTRACT(32, A); break;
@@ -440,12 +506,11 @@ do { \
 #endif
 
 #define OP_EXTRACT2(bits) \
-    ST( \
+    ST0( \
         call_intrinsic(l, "llvm.fshr", \
             INTTY(bits), NULL, \
             ARG2R, ARG1R, CONST(bits, ARG3), NULL \
-        ), \
-        ARG0L \
+        ) \
     )
         case INDEX_op_extract2_i32:  OP_EXTRACT2(32); break;
 #if HBITS == 64
@@ -453,15 +518,14 @@ do { \
 #endif
 
 #define OP_BSWAP(swap_bits, dst_bits) \
-    ST( \
+    ST0( \
         ZEXT( \
             call_intrinsic(l, \
                 "llvm.bswap", INTTY(swap_bits), NULL, \
                 TRUNC(ARG1R, swap_bits), NULL \
             ), \
             dst_bits \
-        ), \
-        ARG0L \
+        ) \
     )
         case INDEX_op_bswap16_i32: OP_BSWAP(16, 32); break;
         case INDEX_op_bswap32_i32: OP_BSWAP(32, 32); break;
@@ -472,12 +536,11 @@ do { \
 #endif
 
 #define OP_ROT(name, bits) \
-    ST( \
+    ST0( \
         call_intrinsic(l, \
             name, INTTY(bits), NULL, \
             ARG1R, ARG1R, ARG2R, NULL \
-        ), \
-        ARG0L \
+        ) \
     )
         case INDEX_op_rotl_i32: OP_ROT("llvm.fshl", 32); break;
         case INDEX_op_rotr_i32: OP_ROT("llvm.fshr", 32); break;
@@ -487,17 +550,15 @@ do { \
 #endif
 
 #define OP_CNTZERO(name, bits) \
-    ST( \
-        LLVMBuildSelect(BLDR, \
+    ST0( \
+        SELECT( \
             INTCMP(ARG1R, CONST(bits, 0), TCG_COND_NE), \
             call_intrinsic(l, \
                 name, INTTY(bits), NULL, \
                 ARG1R, CONST(1, 0), NULL \
             ), \
-            ARG2R, \
-            "" \
-        ), \
-        ARG0L \
+            ARG2R \
+        ) \
     )
         case INDEX_op_clz_i32: OP_CNTZERO("llvm.ctlz", 32); break;
         case INDEX_op_ctz_i32: OP_CNTZERO("llvm.cttz", 32); break;
@@ -505,6 +566,15 @@ do { \
         case INDEX_op_clz_i64: OP_CNTZERO("llvm.ctlz", 64); break;
         case INDEX_op_ctz_i64: OP_CNTZERO("llvm.cttz", 64); break;
 #endif
+
+        case INDEX_op_br: {
+            LLVMBuildBr(l->bldr, ARG0BB);
+            break;
+        }
+        case INDEX_op_set_label: {
+            switch_bb(l, ARG0BB);
+            break;
+        }
 
 #define OP_BRCOND(bits) \
 do { \
@@ -519,25 +589,22 @@ do { \
 #if HBITS == 64
         case INDEX_op_brcond_i64: OP_BRCOND(64); break;
 #endif
-        case INDEX_op_set_label: {
-            switch_bb(l, arg_label(ARG0)->llvm_bb);
-            break;
-        }
+
 #define OP_MOVCOND(bits) \
-    ST( \
-        LLVMBuildSelect(BLDR, \
+    ST0( \
+        SELECT( \
             INTCMP(ARG1R, ARG2R, ARG5), \
-            ARG3R, ARG4R, \
-            "" \
-        ), \
-        ARG0L \
+            ARG3R, \
+            ARG4R \
+        ) \
     )
         case INDEX_op_movcond_i32: OP_MOVCOND(32); break;
 #if HBITS == 64
         case INDEX_op_movcond_i64: OP_MOVCOND(64); break;
 #endif
+
 #define OP_SETCOND(bits) \
-    ST(ZEXT(INTCMP(ARG1R, ARG2R, ARG3), bits), ARG0L)
+    ST0(ZEXT(INTCMP(ARG1R, ARG2R, ARG3), bits))
         case INDEX_op_setcond_i32: OP_SETCOND(32); break;
 #if HBITS == 64
         case INDEX_op_setcond_i64: OP_SETCOND(64); break;
@@ -545,10 +612,7 @@ do { \
 
 // XXX: memory barrier!!! and endian swap
 #define OP_QEMU_LD_HELPER(src_bits, dst_bits, ext_kind) \
-    ST( \
-        EXTEND(LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind), \
-        ARG0L \
-    )
+    ST0(EXTEND(LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind))
 #define OP_QEMU_LD(bits) \
 do { \
     switch (get_memop(ARG2) & (MO_BSWAP | MO_SSIZE)) { \
@@ -610,7 +674,7 @@ do { \
 
             result = LLVMBuildCall(BLDR, fn, args, nb_iargs, "");
             if (nb_oargs) {
-                ST(result, ARG0L);
+                ST0(result);
             }
             break;
         }
@@ -618,8 +682,9 @@ do { \
         case INDEX_op_insn_start: break;
 
         default:
-            printf("TODO: %s\n", def->name);
-            dump_module(l->mod);exit(1);
+            qemu_log("TODO: %s\n", def->name);
+            dump_module(l->mod);
+            tcg_abort();
             break;
 
         // TODO

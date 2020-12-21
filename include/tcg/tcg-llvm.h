@@ -1,3 +1,12 @@
+/*
+ * QEMU TCG JIT using LLVM
+ *
+ * Copyright (C) 2020, Zhang Boyang <zhangboyang.id@gmail.com>
+ *
+ * License: GNU GPL, version 2 or later.
+ *   See the COPYING file in the top-level directory.
+ */
+
 #ifndef TCG_LLVM_H
 #define TCG_LLVM_H
 #ifdef CONFIG_TCG_LLVM
