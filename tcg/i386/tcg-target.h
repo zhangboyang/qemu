@@ -174,15 +174,9 @@ extern bool have_avx2;
 #endif
 
 /* We do not support older SSE systems, only beginning with AVX1.  */
-#ifdef CONFIG_TCG_LLVM
-#define TCG_TARGET_HAS_v64              0
-#define TCG_TARGET_HAS_v128             0
-#define TCG_TARGET_HAS_v256             0
-#else
 #define TCG_TARGET_HAS_v64              have_avx1
 #define TCG_TARGET_HAS_v128             have_avx1
 #define TCG_TARGET_HAS_v256             have_avx2
-#endif
 
 #define TCG_TARGET_HAS_andc_vec         1
 #define TCG_TARGET_HAS_orc_vec          0

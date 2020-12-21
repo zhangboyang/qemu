@@ -191,10 +191,10 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
     int regdiff = 0;
     if (itb->llvm_tc) {
         //fprintf(stderr, "llvm_tc = %p\n", itb->llvm_tc);
-        if (0) {
+        if (1) {
             ret = ((uintptr_t (*)(void *))itb->llvm_tc)(env);
         }
-        if (1) {
+        if (0) {
             ret = tcg_qemu_tb_exec(env, tb_ptr);
         }
         if (0) {
