@@ -39,9 +39,17 @@ typedef struct TCGLLVMContext {
     LLVMModuleRef mod;
     LLVMValueRef fn;
     LLVMValueRef env;
+
+    /* Hot code finder */
+    QLIST_HEAD(, TranslationBlock) hot_tb;
 } TCGLLVMContext;
 
+
 void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb);
+bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
+    CPUArchState *env, uintptr_t *ret);
+void tcg_llvm_init_tb(TCGContext *s, TranslationBlock *tb);
+void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb);
 void tcg_llvm_context_init(TCGContext *s);
 void tcg_llvm_init(void);
 

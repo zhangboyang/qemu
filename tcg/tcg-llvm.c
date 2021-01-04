@@ -248,21 +248,31 @@ static inline void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
     LLVMPositionBuilderAtEnd(l->bldr, next_bb);
 }
 
+#define MAX_TB_NAME 128
+static inline void make_tb_name(char *tb_name, TranslationBlock *tb)
+{
+    sprintf(tb_name, "tb_%016" PRIx64, (uint64_t) tb->pc);
+}
+
 void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
 {
     TCGLLVMContext *l = s->llvm_ctx;
+    LLVMBasicBlockRef entry_bb, body_bb;
+    TCGOp *op;
+    char tb_name[MAX_TB_NAME];
 
-    char tbname[128];
-    sprintf(tbname, "tb_%016" PRIx64, (uint64_t) tb->pc);
     memset(l->temps, 0, sizeof(l->temps));
-    
-    l->mod = LLVMModuleCreateWithNameInContext(tbname, l->ctx);
-    l->fn = LLVMAddFunction(l->mod, tbname, l->tbtype);
+
+    make_tb_name(tb_name, tb);
+    if (l->mod == NULL) {
+        l->mod = LLVMModuleCreateWithNameInContext(tb_name, l->ctx);
+    }
+    l->fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
     l->env = LLVMGetParam(l->fn, l->tbargs);
     LLVMAddAttributeAtIndex(l->fn, 1 + l->tbargs, l->noalias);
     //LLVMSetFunctionCallConv(fn, LLVMFastCallConv);
     //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->noreturn);
-    LLVMBasicBlockRef entry_bb, body_bb;
+
     entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
     body_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "body");
     LLVMPositionBuilderAtEnd(l->ebldr, entry_bb);
@@ -270,9 +280,6 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
     LLVMPositionBuilderAtEnd(l->bldr, body_bb);
 
     
-
-    TCGOp *op;
-
     QTAILQ_FOREACH(op, &s->ops, link) {
         const TCGOpDef *def;
         TCGOpcode c;
@@ -700,23 +707,83 @@ do { \
         }
     }
 
-    
     //dump_module(l->mod);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
-    LLVMRunPassManager(l->pm, l->mod);
-    //dump_module(l->mod);
+}
+
+bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
+    CPUArchState *env, uintptr_t *ret)
+{
+    TCGLLVMContext *l = s->llvm_ctx;
+
+    uint64_t limit1 = 2000, limit2 = 20000;
+
+    if (!tb->llvm_tc) {
+        LLVMOrcThreadSafeModuleRef tsm;
+        LLVMOrcJITTargetAddress addr;
+        uint64_t tb_count = 0;
+        char tb_name[MAX_TB_NAME];
+        TranslationBlock *htb, *nhtb;
+
+        tb->exec_count++;
+        if (tb->exec_count < limit2) {
+            return false;
+        }
+
+        
+        printf("trigger compile!\n");
+
+        LLVMModuleRef tmp_mod = LLVMCloneModule(l->mod); // XXX
+
+        printf("find hot code!\n");
+
+        QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
+            make_tb_name(tb_name, htb);
+            if (htb->exec_count < limit1) {
+                LLVMDeleteFunction(LLVMGetNamedFunction(tmp_mod, tb_name));
+            }
+        }
+
+        printf("LLVMRunPassManager bgein!\n");
+        LLVMRunPassManager(l->pm, tmp_mod);
+        //dump_module(tmp_mod);
+        printf("LLVMRunPassManager end!\n");
+
+        tsm = LLVMOrcCreateNewThreadSafeModule(tmp_mod, l->tsctx);
+        check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
 
-    LLVMOrcThreadSafeModuleRef tsm;
-    tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
-    check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
+        QLIST_FOREACH_SAFE(htb, &l->hot_tb, hot_link, nhtb) {
+            if (htb->exec_count < limit1) {
+                continue;
+            }
+            tb_count++;
+            make_tb_name(tb_name, htb);
+            QLIST_REMOVE(htb, hot_link);
+            LLVMDeleteFunction(LLVMGetNamedFunction(l->mod, tb_name));
+            check_error(LLVMOrcLLJITLookup(l->jit, &addr, tb_name));
+            printf("%s = %p; %" PRIu64 "\n", tb_name, (void *)addr, htb->exec_count);
+            //log_disas((void *)addr, 200);
+            htb->llvm_tc = (void *)addr;
+        }
 
-    LLVMOrcJITTargetAddress addr;
-    check_error(LLVMOrcLLJITLookup(l->jit, &addr, tbname));
-    //printf("%s = %p\n", tbname, (void *)addr);
-    //log_disas((void *)addr, 200);
-    tb->llvm_tc = (void *)addr;
+        printf("compile done! (%" PRIu64 " compiled)\n", tb_count);
+    }
+    *ret = ((uintptr_t (*)(void *))tb->llvm_tc)(env);
+    return true;
+}
+
+void tcg_llvm_init_tb(TCGContext *s, TranslationBlock *tb)
+{
+    tb->llvm_tc = NULL;
+    tb->exec_count = 0;
+    QLIST_INSERT_HEAD(&s->llvm_ctx->hot_tb, tb, hot_link);
+}
+void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb)
+{
+    printf("tb %p removed!\n", tb);
+    QLIST_REMOVE(tb, hot_link);
 }
 
 void tcg_llvm_context_init(TCGContext *s)
@@ -749,7 +816,8 @@ void tcg_llvm_context_init(TCGContext *s)
 #undef GET_KINDID
 
 
-    
+    QLIST_INIT(&l->hot_tb);
+
     l->tbargs = 0;
     {
         int nargs = l->tbargs + 1;

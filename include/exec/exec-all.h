@@ -478,6 +478,8 @@ struct TranslationBlock {
     struct tb_tc tc;
 #ifdef CONFIG_TCG_LLVM
     void *llvm_tc;
+    uint64_t exec_count;
+    QLIST_ENTRY(TranslationBlock) hot_link;
 #endif
 
     /* original tb when cflags has CF_NOCACHE */

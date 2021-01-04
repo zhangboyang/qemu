@@ -391,6 +391,9 @@ static int cpu_restore_state_from_tb(CPUState *cpu, TranslationBlock *tb,
 
 void tb_destroy(TranslationBlock *tb)
 {
+#ifdef CONFIG_TCG_LLVM
+    tcg_llvm_remove_tb(tcg_ctx, tb);
+#endif
     qemu_spin_destroy(&tb->jmp_lock);
 }
 
@@ -1725,11 +1728,12 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
         cpu_loop_exit(cpu);
     }
 
+#ifdef CONFIG_TCG_LLVM
+    tcg_llvm_init_tb(tcg_ctx, tb);
+#endif
+
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = gen_code_buf;
-#ifdef CONFIG_TCG_LLVM
-    tb->llvm_tc = NULL;
-#endif
     tb->pc = pc;
     tb->cs_base = cs_base;
     tb->flags = flags;
