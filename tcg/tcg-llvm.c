@@ -698,7 +698,7 @@ do { \
         case INDEX_op_goto_tb:
             break;
         case INDEX_op_goto_ptr:
-            LLVMBuildRet(BLDR, CONST(HBITS, (unsigned long long)tb));
+            LLVMBuildRet(BLDR, CONST(HBITS, 0));
             break;
         case INDEX_op_exit_tb:
             LLVMBuildRet(BLDR, ARG0C);
@@ -747,7 +747,7 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 
         printf("LLVMRunPassManager bgein!\n");
         LLVMRunPassManager(l->pm, tmp_mod);
-        //dump_module(tmp_mod);
+        dump_module(tmp_mod);
         printf("LLVMRunPassManager end!\n");
 
         tsm = LLVMOrcCreateNewThreadSafeModule(tmp_mod, l->tsctx);
@@ -770,7 +770,9 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 
         printf("compile done! (%" PRIu64 " compiled)\n", tb_count);
     }
+    //printf("llvm exec! begin\n");
     *ret = ((uintptr_t (*)(void *))tb->llvm_tc)(env);
+    //printf("llvm exec! done; ret=%p\n", (void *)*ret);
     return true;
 }
 
