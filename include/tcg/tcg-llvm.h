@@ -40,6 +40,9 @@ typedef struct TCGLLVMContext {
     LLVMValueRef fn;
     LLVMValueRef env;
 
+    /* Prologue */
+    uintptr_t (*prologue)(void *func, CPUArchState *env);
+
     /* Hot code finder */
     QLIST_HEAD(, TranslationBlock) hot_tb;
 } TCGLLVMContext;

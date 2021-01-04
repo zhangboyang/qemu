@@ -270,7 +270,7 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
     l->fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
     l->env = LLVMGetParam(l->fn, l->tbargs);
     LLVMAddAttributeAtIndex(l->fn, 1 + l->tbargs, l->noalias);
-    //LLVMSetFunctionCallConv(fn, LLVMFastCallConv);
+    LLVMSetFunctionCallConv(l->fn, LLVMFastCallConv);
     //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->noreturn);
 
     entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
@@ -287,7 +287,7 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         c = op->opc;
         def = &tcg_op_defs[c];
 
-        //printf(">>%s\n", def->name);
+        //qemu_log(">>%s\n", def->name);
 
         switch (c) {
 #define BLDR (l->bldr)
@@ -732,11 +732,11 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
         }
 
         
-        printf("trigger compile!\n");
+        qemu_log("trigger compile!\n");
 
         LLVMModuleRef tmp_mod = LLVMCloneModule(l->mod); // XXX
 
-        printf("find hot code!\n");
+        qemu_log("find hot code!\n");
 
         QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
             make_tb_name(tb_name, htb);
@@ -745,10 +745,11 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
             }
         }
 
-        printf("LLVMRunPassManager bgein!\n");
+        qemu_log("LLVMRunPassManager bgein!\n");
+        dump_module(tmp_mod);
         LLVMRunPassManager(l->pm, tmp_mod);
         dump_module(tmp_mod);
-        printf("LLVMRunPassManager end!\n");
+        qemu_log("LLVMRunPassManager end!\n");
 
         tsm = LLVMOrcCreateNewThreadSafeModule(tmp_mod, l->tsctx);
         check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
@@ -763,16 +764,16 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
             QLIST_REMOVE(htb, hot_link);
             LLVMDeleteFunction(LLVMGetNamedFunction(l->mod, tb_name));
             check_error(LLVMOrcLLJITLookup(l->jit, &addr, tb_name));
-            printf("%s = %p; %" PRIu64 "\n", tb_name, (void *)addr, htb->exec_count);
+            qemu_log("%s = %p; %" PRIu64 "\n", tb_name, (void *)addr, htb->exec_count);
             //log_disas((void *)addr, 200);
             htb->llvm_tc = (void *)addr;
         }
 
-        printf("compile done! (%" PRIu64 " compiled)\n", tb_count);
+        qemu_log("compile done! (%" PRIu64 " compiled)\n", tb_count);
     }
-    //printf("llvm exec! begin\n");
-    *ret = ((uintptr_t (*)(void *))tb->llvm_tc)(env);
-    //printf("llvm exec! done; ret=%p\n", (void *)*ret);
+    //qemu_log("llvm exec! begin\n");
+    *ret = l->prologue(tb->llvm_tc, env);
+    //qemu_log("llvm exec! done; ret=%p\n", (void *)*ret);
     return true;
 }
 
@@ -784,7 +785,7 @@ void tcg_llvm_init_tb(TCGContext *s, TranslationBlock *tb)
 }
 void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb)
 {
-    printf("tb %p removed!\n", tb);
+    qemu_log("tb %p removed!\n", tb);
     QLIST_REMOVE(tb, hot_link);
 }
 
@@ -821,16 +822,43 @@ void tcg_llvm_context_init(TCGContext *s)
     QLIST_INIT(&l->hot_tb);
 
     l->tbargs = 0;
-    {
-        int nargs = l->tbargs + 1;
-        LLVMTypeRef args[nargs];
-        int i;
-        for (i = 0; i < l->tbargs; i++) {
-            args[i] = INTTY(GBITS);
-        }
-        args[l->tbargs] = PTRTY(INTTY(8));
-        l->tbtype = LLVMFunctionType(INTTY(HBITS), args, nargs, 0);
+    LLVMTypeRef args[l->tbargs + 1];
+    int i;
+    for (i = 0; i < l->tbargs; i++) {
+        args[i] = INTTY(GBITS);
     }
+    args[l->tbargs] = PTRTY(INTTY(8));
+    l->tbtype = LLVMFunctionType(INTTY(HBITS), args, l->tbargs + 1, 0);
+
+
+    LLVMModuleRef prologue_mod;
+    LLVMValueRef prologue_fn;
+    LLVMValueRef prologue_argvl[l->tbargs + 1];
+    LLVMValueRef prologue_call;
+    LLVMTypeRef prologue_type;
+    LLVMTypeRef prologue_argty[2]; /* prologue(func, env) */
+    LLVMOrcThreadSafeModuleRef tsm;
+    LLVMOrcJITTargetAddress addr;
+    prologue_argty[0] = prologue_argty[1] = PTRTY(INTTY(8));
+    prologue_mod = LLVMModuleCreateWithNameInContext("prologue", l->ctx);
+    prologue_type = LLVMFunctionType(INTTY(HBITS), prologue_argty, 2, 0);
+    prologue_fn = LLVMAddFunction(prologue_mod, "prologue", prologue_type);
+    prologue_argvl[l->tbargs] = LLVMGetParam(prologue_fn, 1);
+    LLVMPositionBuilderAtEnd(l->bldr,
+        LLVMAppendBasicBlockInContext(l->ctx, prologue_fn, "entry"));
+    prologue_call = LLVMBuildCall(l->bldr,
+        LLVMBuildBitCast(l->bldr,
+            LLVMGetParam(prologue_fn, 0),
+            LLVMPointerType(l->tbtype, 0), ""),
+        prologue_argvl, l->tbargs + 1, "");
+    LLVMSetInstructionCallConv(prologue_call, LLVMFastCallConv);
+    LLVMBuildRet(l->bldr, prologue_call);
+    LLVMVerifyFunction(prologue_fn, LLVMAbortProcessAction);
+    dump_module(prologue_mod);
+    tsm = LLVMOrcCreateNewThreadSafeModule(prologue_mod, l->tsctx);
+    check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
+    check_error(LLVMOrcLLJITLookup(l->jit, &addr, "prologue"));
+    l->prologue = (void *)addr;
 }
 
 void tcg_llvm_init(void)
