@@ -25,6 +25,7 @@ typedef struct TCGLLVMContext {
     LLVMContextRef ctx;
     LLVMBuilderRef bldr;
     LLVMBuilderRef ebldr; /* builder for function entry block */
+    LLVMBuilderRef tbldr; /* builder for temporary purpose */
     LLVMOrcJITDylibRef jd;
     LLVMPassManagerRef pm;
 
@@ -33,6 +34,7 @@ typedef struct TCGLLVMContext {
     LLVMAttributeRef noalias;
     int tbargs;
     LLVMTypeRef tbtype;
+    unsigned tbcallconv;
 
     /* Temporary values */
     LLVMValueRef temps[TCG_MAX_TEMPS];
@@ -45,6 +47,7 @@ typedef struct TCGLLVMContext {
 
     /* Hot code finder */
     QLIST_HEAD(, TranslationBlock) hot_tb;
+    uint64_t hot_limit1, hot_limit2;
 } TCGLLVMContext;
 
 
@@ -55,6 +58,9 @@ void tcg_llvm_init_tb(TCGContext *s, TranslationBlock *tb);
 void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb);
 void tcg_llvm_context_init(TCGContext *s);
 void tcg_llvm_init(void);
+
+
+void QLLVMDeleteFunctionBody(LLVMValueRef Fn);
 
 #endif
 #endif

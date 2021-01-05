@@ -249,9 +249,37 @@ static inline void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
 }
 
 #define MAX_TB_NAME 128
-static inline void make_tb_name(char *tb_name, TranslationBlock *tb)
+static inline void make_tb_name(char *tb_name, const char *t, target_ulong pc)
 {
-    sprintf(tb_name, "tb_%016" PRIx64, (uint64_t) tb->pc);
+    sprintf(tb_name, "%s_%016" PRIx64, t, (uint64_t) pc);
+}
+
+static inline LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
+{
+    LLVMValueRef fn;
+    char tb_name[MAX_TB_NAME];
+    make_tb_name(tb_name, "tb", pc);
+    fn = LLVMGetNamedFunction(l->mod, tb_name);
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
+        LLVMSetFunctionCallConv(fn, l->tbcallconv);
+        LLVMAddAttributeAtIndex(fn, 1 + l->tbargs, l->noalias);
+    }
+    return fn;
+}
+static inline LLVMValueRef get_tb_flag(TCGLLVMContext *l, target_ulong pc)
+{
+    LLVMValueRef g;
+    char tb_name[MAX_TB_NAME];
+    make_tb_name(tb_name, "flag", pc);
+    g = LLVMGetNamedGlobal(l->mod, tb_name);
+    if (!g) {
+        g = LLVMAddGlobal(l->mod, INTTY(1), tb_name);
+        LLVMSetGlobalConstant(g, 1);
+        LLVMSetInitializer(g, CONST(1, 0));
+        LLVMSetLinkage(g, LLVMInternalLinkage);
+    }
+    return g;
 }
 
 void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
@@ -259,19 +287,15 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
     TCGLLVMContext *l = s->llvm_ctx;
     LLVMBasicBlockRef entry_bb, body_bb;
     TCGOp *op;
-    char tb_name[MAX_TB_NAME];
-
+    
     memset(l->temps, 0, sizeof(l->temps));
-
-    make_tb_name(tb_name, tb);
+    
     if (l->mod == NULL) {
-        l->mod = LLVMModuleCreateWithNameInContext(tb_name, l->ctx);
+        l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
     }
-    l->fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
+    l->fn = get_tb_func(l, tb->pc);
+    get_tb_flag(l, tb->pc);
     l->env = LLVMGetParam(l->fn, l->tbargs);
-    LLVMAddAttributeAtIndex(l->fn, 1 + l->tbargs, l->noalias);
-    LLVMSetFunctionCallConv(l->fn, LLVMFastCallConv);
-    //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->noreturn);
 
     entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
     body_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "body");
@@ -695,13 +719,31 @@ do { \
             break;
 
         // TODO
-        case INDEX_op_goto_tb:
+        case INDEX_op_goto_tb: {
+            target_ulong next_pc = ARG1;
+            LLVMBasicBlockRef bb_exist = NEWBB("");
+            LLVMBasicBlockRef bb_notexist = NEWBB("");
+            LLVMValueRef args[l->tbargs + 1];
+            LLVMValueRef result;
+
+            CONDBR(LD(get_tb_flag(l, next_pc)), bb_exist, bb_notexist);
+
+            switch_bb(l, bb_exist);
+            args[l->tbargs] = l->env;
+            result = LLVMBuildCall(BLDR,
+                get_tb_func(l, next_pc),
+                args, l->tbargs + 1, "");
+            LLVMSetInstructionCallConv(result, l->tbcallconv);
+            LLVMBuildRet(BLDR, result);
+
+            switch_bb(l, bb_notexist);
             break;
+        }
         case INDEX_op_goto_ptr:
             LLVMBuildRet(BLDR, CONST(HBITS, 0));
             break;
         case INDEX_op_exit_tb:
-            LLVMBuildRet(BLDR, ARG0C);
+            LLVMBuildRet(BLDR, AND(ARG0C, CONST(HBITS, TB_EXIT_MASK)));
             break;
 #undef BLDR
         }
@@ -717,8 +759,6 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 {
     TCGLLVMContext *l = s->llvm_ctx;
 
-    uint64_t limit1 = 2000, limit2 = 20000;
-
     if (!tb->llvm_tc) {
         LLVMOrcThreadSafeModuleRef tsm;
         LLVMOrcJITTargetAddress addr;
@@ -727,26 +767,34 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
         TranslationBlock *htb, *nhtb;
 
         tb->exec_count++;
-        if (tb->exec_count < limit2) {
+        if (tb->exec_count < l->hot_limit2) {
             return false;
         }
 
         
         qemu_log("trigger compile!\n");
-
+        //dump_module(l->mod);
         LLVMModuleRef tmp_mod = LLVMCloneModule(l->mod); // XXX
 
         qemu_log("find hot code!\n");
+        
 
         QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
-            make_tb_name(tb_name, htb);
-            if (htb->exec_count < limit1) {
-                LLVMDeleteFunction(LLVMGetNamedFunction(tmp_mod, tb_name));
+            make_tb_name(tb_name, "tb", htb->pc);
+            LLVMValueRef fn = LLVMGetNamedFunction(tmp_mod, tb_name);
+            make_tb_name(tb_name, "flag", htb->pc);
+            LLVMValueRef g = LLVMGetNamedGlobal(tmp_mod, tb_name);
+            if (htb->exec_count < l->hot_limit1) {
+                LLVMReplaceAllUsesWith(fn, LLVMGetUndef(l->tbtype));
+                LLVMDeleteFunction(fn);
+            } else {
+                //printf("tb_name=%s g=%p\n", tb_name, g);
+                LLVMSetInitializer(g, CONST(1, 1));
             }
         }
 
         qemu_log("LLVMRunPassManager bgein!\n");
-        dump_module(tmp_mod);
+        //dump_module(tmp_mod);
         LLVMRunPassManager(l->pm, tmp_mod);
         dump_module(tmp_mod);
         qemu_log("LLVMRunPassManager end!\n");
@@ -756,13 +804,17 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 
 
         QLIST_FOREACH_SAFE(htb, &l->hot_tb, hot_link, nhtb) {
-            if (htb->exec_count < limit1) {
+            if (htb->exec_count < l->hot_limit1) {
                 continue;
             }
             tb_count++;
-            make_tb_name(tb_name, htb);
             QLIST_REMOVE(htb, hot_link);
-            LLVMDeleteFunction(LLVMGetNamedFunction(l->mod, tb_name));
+
+            make_tb_name(tb_name, "flag", htb->pc);
+            LLVMSetInitializer(LLVMGetNamedGlobal(l->mod, tb_name), CONST(1, 1));
+
+            make_tb_name(tb_name, "tb", htb->pc);
+            QLLVMDeleteFunctionBody(LLVMGetNamedFunction(l->mod, tb_name));
             check_error(LLVMOrcLLJITLookup(l->jit, &addr, tb_name));
             qemu_log("%s = %p; %" PRIu64 "\n", tb_name, (void *)addr, htb->exec_count);
             //log_disas((void *)addr, 200);
@@ -800,6 +852,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->ctx = LLVMOrcThreadSafeContextGetContext(l->tsctx);
     l->bldr = LLVMCreateBuilderInContext(l->ctx);
     l->ebldr = LLVMCreateBuilderInContext(l->ctx);
+    l->tbldr = LLVMCreateBuilderInContext(l->ctx);
     l->jd = LLVMOrcLLJITGetMainJITDylib(l->jit);
 
     l->pm = LLVMCreatePassManager();
@@ -810,6 +863,8 @@ void tcg_llvm_context_init(TCGContext *s)
     LLVMAddReassociatePass(l->pm);
     LLVMAddInstructionCombiningPass(l->pm);
     LLVMAddGVNPass(l->pm);
+    LLVMAddTailCallEliminationPass(l->pm);
+    LLVMAddCFGSimplificationPass(l->pm);
     LLVMAddInstructionCombiningPass(l->pm);
     LLVMAddDeadStoreEliminationPass(l->pm);
 
@@ -820,6 +875,10 @@ void tcg_llvm_context_init(TCGContext *s)
 
 
     QLIST_INIT(&l->hot_tb);
+    l->hot_limit1 = 2000;
+    l->hot_limit2 = 20000;
+
+    l->tbcallconv = 18;
 
     l->tbargs = 0;
     LLVMTypeRef args[l->tbargs + 1];
@@ -844,17 +903,17 @@ void tcg_llvm_context_init(TCGContext *s)
     prologue_type = LLVMFunctionType(INTTY(HBITS), prologue_argty, 2, 0);
     prologue_fn = LLVMAddFunction(prologue_mod, "prologue", prologue_type);
     prologue_argvl[l->tbargs] = LLVMGetParam(prologue_fn, 1);
-    LLVMPositionBuilderAtEnd(l->bldr,
+    LLVMPositionBuilderAtEnd(l->tbldr,
         LLVMAppendBasicBlockInContext(l->ctx, prologue_fn, "entry"));
-    prologue_call = LLVMBuildCall(l->bldr,
-        LLVMBuildBitCast(l->bldr,
+    prologue_call = LLVMBuildCall(l->tbldr,
+        LLVMBuildBitCast(l->tbldr,
             LLVMGetParam(prologue_fn, 0),
             LLVMPointerType(l->tbtype, 0), ""),
         prologue_argvl, l->tbargs + 1, "");
-    LLVMSetInstructionCallConv(prologue_call, LLVMFastCallConv);
-    LLVMBuildRet(l->bldr, prologue_call);
+    LLVMSetInstructionCallConv(prologue_call, l->tbcallconv);
+    LLVMBuildRet(l->tbldr, prologue_call);
     LLVMVerifyFunction(prologue_fn, LLVMAbortProcessAction);
-    dump_module(prologue_mod);
+    //dump_module(prologue_mod);
     tsm = LLVMOrcCreateNewThreadSafeModule(prologue_mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, "prologue"));

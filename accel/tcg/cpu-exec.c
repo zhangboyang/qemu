@@ -182,7 +182,7 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
 #ifdef CONFIG_TCG_LLVM
     if (!tcg_llvm_try_exec_tb(tcg_ctx, itb, env, &ret)) {
         //printf("tcg exec begin! tb.pc=%p\n", (void*)itb->pc);
-        ret = tcg_qemu_tb_exec(env, tb_ptr);
+        ret = tcg_qemu_tb_exec(env, tb_ptr) & TB_EXIT_MASK;
         //printf("tcg exec done!\n");
     }
 #else

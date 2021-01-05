@@ -12,3 +12,10 @@
  * a C++ linker, which is required by LLVM (even we are using C interface).
  * Moreover, At some day we may have to write some C++ code eventually.
  */
+
+#include <llvm-c/Core.h>
+#include <llvm/IR/Function.h>
+using namespace llvm;
+extern "C" void QLLVMDeleteFunctionBody(LLVMValueRef Fn) {
+    unwrap<Function>(Fn)->deleteBody();
+}
