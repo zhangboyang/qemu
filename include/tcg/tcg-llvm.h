@@ -14,6 +14,7 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/Orc.h>
+#include <llvm-c/OrcEE.h>
 #include <llvm-c/LLJIT.h>
 #include <llvm-c/Transforms/PassManagerBuilder.h>
 

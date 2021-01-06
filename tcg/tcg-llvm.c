@@ -206,8 +206,8 @@ static inline LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
                     INTTY(8),
                     l->env,
                     &off, 1,
-                    ts->name);
-                l->temps[idx] = LLVMBuildBitCast(BLDR, gep, dst_ty, "");
+                    "");
+                l->temps[idx] = LLVMBuildBitCast(BLDR, gep, dst_ty, ts->name);
             }
         }
         return l->temps[idx];
@@ -780,21 +780,23 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 
         qemu_log("find hot code!\n");
         
-
+        LLVMPassManagerRef fpm = LLVMCreateFunctionPassManagerForModule(tmp_mod);
+        LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, fpm);
         QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
             make_tb_name(tb_name, "tb", htb->pc);
             LLVMValueRef fn = LLVMGetNamedFunction(tmp_mod, tb_name);
             make_tb_name(tb_name, "flag", htb->pc);
             LLVMValueRef g = LLVMGetNamedGlobal(tmp_mod, tb_name);
             if (htb->exec_count < l->hot_limit1) {
-                LLVMReplaceAllUsesWith(fn, LLVMGetUndef(l->tbtype));
+                LLVMReplaceAllUsesWith(fn, LLVMGetUndef(LLVMTypeOf(fn)));
                 LLVMDeleteFunction(fn);
             } else {
                 //printf("tb_name=%s g=%p\n", tb_name, g);
                 LLVMSetInitializer(g, CONST(1, 1));
-                //LLVMRunFunctionPassManager(l->fpm, fn);
+                LLVMRunFunctionPassManager(fpm, fn);
             }
         }
+        LLVMDisposePassManager(fpm);
 
         qemu_log("LLVMRunPassManager bgein!\n");
         //dump_module(tmp_mod);
@@ -844,19 +846,37 @@ void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb)
     QLIST_REMOVE(tb, hot_link);
 }
 
+static LLVMOrcObjectLayerRef create_oll(
+    void *Ctx, LLVMOrcExecutionSessionRef ES, const char *Triple)
+{
+    //TCGLLVMContext *l = Ctx;
+    LLVMOrcObjectLayerRef ol;
+    ol = LLVMOrcCreateRTDyldObjectLinkingLayerWithSectionMemoryManager(ES);
+    LLVMJITEventListenerRef perf;
+    perf = LLVMCreatePerfJITEventListener();
+    assert(perf);
+    LLVMOrcRTDyldObjectLinkingLayerRegisterJITEventListener(ol, perf);
+    return ol;
+}
+
 void tcg_llvm_context_init(TCGContext *s)
 {
     TCGLLVMContext *l = g_malloc0(sizeof(*l));
     s->llvm_ctx = l;
     l->s = s;
     
-    check_error(LLVMOrcCreateLLJIT(&l->jit, NULL));
+    LLVMOrcLLJITBuilderRef jb;
+    jb = LLVMOrcCreateLLJITBuilder();
+    LLVMOrcLLJITBuilderSetObjectLinkingLayerCreator(jb, create_oll, l);
+
+    check_error(LLVMOrcCreateLLJIT(&l->jit, jb));
     l->tsctx = LLVMOrcCreateNewThreadSafeContext();
     l->ctx = LLVMOrcThreadSafeContextGetContext(l->tsctx);
     l->bldr = LLVMCreateBuilderInContext(l->ctx);
     l->ebldr = LLVMCreateBuilderInContext(l->ctx);
     l->tbldr = LLVMCreateBuilderInContext(l->ctx);
     l->jd = LLVMOrcLLJITGetMainJITDylib(l->jit);
+
 
     l->pmb = LLVMPassManagerBuilderCreate();
     l->mpm = LLVMCreatePassManager();
