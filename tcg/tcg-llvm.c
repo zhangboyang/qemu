@@ -269,17 +269,16 @@ static inline LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
     }
     return fn;
 }
-static inline LLVMValueRef get_tb_flag(TCGLLVMContext *l, target_ulong pc)
+static inline LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
 {
     LLVMValueRef g;
     char tb_name[MAX_TB_NAME];
-    make_tb_name(tb_name, "flag", pc);
+    make_tb_name(tb_name, "stub", pc);
     g = LLVMGetNamedGlobal(l->mod, tb_name);
     if (!g) {
-        g = LLVMAddGlobal(l->mod, INTTY(1), tb_name);
-        LLVMSetGlobalConstant(g, 1);
-        LLVMSetInitializer(g, CONST(1, 0));
-        LLVMSetLinkage(g, LLVMInternalLinkage);
+        g = LLVMAddGlobal(l->mod, PTRTY(l->tbtype), tb_name);
+        LLVMSetInitializer(g, LLVMConstPointerNull(PTRTY(l->tbtype)));
+        LLVMSetLinkage(g, LLVMWeakAnyLinkage);
     }
     return g;
 }
@@ -296,7 +295,7 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
     }
     l->fn = get_tb_func(l, tb->pc);
-    get_tb_flag(l, tb->pc);
+    get_tb_stub(l, tb->pc);
     l->env = LLVMGetParam(l->fn, l->tbargs);
 
     entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
@@ -726,15 +725,18 @@ do { \
             LLVMBasicBlockRef bb_exist = NEWBB("");
             LLVMBasicBlockRef bb_notexist = NEWBB("");
             LLVMValueRef args[l->tbargs + 1];
+            LLVMValueRef next_tb;
+            LLVMValueRef exist_flag;
             LLVMValueRef result;
 
-            CONDBR(LD(get_tb_flag(l, next_pc)), bb_exist, bb_notexist);
+            next_tb = LD(get_tb_stub(l, next_pc));
+            exist_flag = LLVMBuildICmp(BLDR, LLVMIntNE,
+                next_tb, LLVMConstPointerNull(TYOF(next_tb)), "");
+            CONDBR(exist_flag, bb_exist, bb_notexist);
 
             switch_bb(l, bb_exist);
             args[l->tbargs] = l->env;
-            result = LLVMBuildCall(BLDR,
-                get_tb_func(l, next_pc),
-                args, l->tbargs + 1, "");
+            result = LLVMBuildCall(BLDR, next_tb, args, l->tbargs + 1, "");
             LLVMSetInstructionCallConv(result, l->tbcallconv);
             LLVMBuildRet(BLDR, result);
 
@@ -763,7 +765,7 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 
     if (!tb->llvm_tc) {
         LLVMOrcThreadSafeModuleRef tsm;
-        LLVMOrcJITTargetAddress addr;
+        LLVMOrcJITTargetAddress gaddr, addr;
         uint64_t tb_count = 0;
         char tb_name[MAX_TB_NAME];
         TranslationBlock *htb, *nhtb;
@@ -779,29 +781,41 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
         LLVMModuleRef tmp_mod = LLVMCloneModule(l->mod); // XXX
 
         qemu_log("find hot code!\n");
-        
-        LLVMPassManagerRef fpm = LLVMCreateFunctionPassManagerForModule(tmp_mod);
-        LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, fpm);
+
         QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
             make_tb_name(tb_name, "tb", htb->pc);
             LLVMValueRef fn = LLVMGetNamedFunction(tmp_mod, tb_name);
-            make_tb_name(tb_name, "flag", htb->pc);
+            make_tb_name(tb_name, "stub", htb->pc);
             LLVMValueRef g = LLVMGetNamedGlobal(tmp_mod, tb_name);
             if (htb->exec_count < l->hot_limit1) {
                 LLVMReplaceAllUsesWith(fn, LLVMGetUndef(LLVMTypeOf(fn)));
                 LLVMDeleteFunction(fn);
             } else {
                 //printf("tb_name=%s g=%p\n", tb_name, g);
-                LLVMSetInitializer(g, CONST(1, 1));
-                LLVMRunFunctionPassManager(fpm, fn);
+                LLVMSetInitializer(g, fn);
+                LLVMSetLinkage(g, LLVMInternalLinkage);
+                LLVMSetGlobalConstant(g, 1);
             }
         }
-        LLVMDisposePassManager(fpm);
+
 
         qemu_log("LLVMRunPassManager bgein!\n");
         //dump_module(tmp_mod);
+
+        LLVMPassManagerRef fpm = LLVMCreateFunctionPassManagerForModule(tmp_mod);
+        LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, fpm);
+        QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
+            if (htb->exec_count < l->hot_limit1) {
+                continue;
+            }
+            make_tb_name(tb_name, "tb", htb->pc);
+            LLVMValueRef fn = LLVMGetNamedFunction(tmp_mod, tb_name);
+            LLVMRunFunctionPassManager(fpm, fn);
+        }
+        LLVMDisposePassManager(fpm);
+        
         LLVMRunPassManager(l->mpm, tmp_mod);
-        dump_module(tmp_mod);
+        //dump_module(tmp_mod);
         qemu_log("LLVMRunPassManager end!\n");
 
         tsm = LLVMOrcCreateNewThreadSafeModule(tmp_mod, l->tsctx);
@@ -815,8 +829,14 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
             tb_count++;
             QLIST_REMOVE(htb, hot_link);
 
-            make_tb_name(tb_name, "flag", htb->pc);
-            LLVMSetInitializer(LLVMGetNamedGlobal(l->mod, tb_name), CONST(1, 1));
+            make_tb_name(tb_name, "tb", htb->pc);
+            LLVMValueRef fn = LLVMGetNamedFunction(l->mod, tb_name);
+            make_tb_name(tb_name, "stub", htb->pc);
+            LLVMValueRef g = LLVMGetNamedGlobal(l->mod, tb_name);
+            LLVMSetInitializer(g, fn);
+            LLVMSetLinkage(g, LLVMInternalLinkage);
+            LLVMSetGlobalConstant(g, 1);
+            LLVMErrorRef gerr = LLVMOrcLLJITLookup(l->jit, &gaddr, tb_name);
 
             make_tb_name(tb_name, "tb", htb->pc);
             QLLVMDeleteFunctionBody(LLVMGetNamedFunction(l->mod, tb_name));
@@ -824,6 +844,11 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
             qemu_log("%s = %p; %" PRIu64 "\n", tb_name, (void *)addr, htb->exec_count);
             //log_disas((void *)addr, 200);
             htb->llvm_tc = (void *)addr;
+            if (gerr) {
+                LLVMConsumeError(gerr);
+            } else {
+                *(void **)gaddr = (void *)addr;
+            }
         }
 
         qemu_log("compile done! (%" PRIu64 " compiled)\n", tb_count);
@@ -881,7 +906,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->pmb = LLVMPassManagerBuilderCreate();
     l->mpm = LLVMCreatePassManager();
     LLVMPassManagerBuilderSetOptLevel(l->pmb, 2);
-    LLVMPassManagerBuilderUseInlinerWithThreshold(l->pmb, 10000);
+    LLVMPassManagerBuilderUseInlinerWithThreshold(l->pmb, 100000);
     //LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, l->fpm);
     LLVMPassManagerBuilderPopulateModulePassManager(l->pmb, l->mpm);
 
