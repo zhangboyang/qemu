@@ -15,6 +15,7 @@
 #include <llvm-c/Target.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/LLJIT.h>
+#include <llvm-c/Transforms/PassManagerBuilder.h>
 
 typedef struct TCGLLVMContext {
     TCGContext *s;
@@ -27,11 +28,14 @@ typedef struct TCGLLVMContext {
     LLVMBuilderRef ebldr; /* builder for function entry block */
     LLVMBuilderRef tbldr; /* builder for temporary purpose */
     LLVMOrcJITDylibRef jd;
-    LLVMPassManagerRef pm;
+    LLVMPassManagerBuilderRef pmb;
+    //LLVMPassManagerRef fpm;
+    LLVMPassManagerRef mpm;
+
 
     /* Convenient values */
-    LLVMAttributeRef noreturn;
     LLVMAttributeRef noalias;
+    LLVMAttributeRef alwaysinline;
     int tbargs;
     LLVMTypeRef tbtype;
     unsigned tbcallconv;

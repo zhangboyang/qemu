@@ -17,6 +17,7 @@
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Transforms/Utils.h>
 #include <llvm-c/Transforms/Scalar.h>
+#include <llvm-c/Transforms/IPO.h>
 
 #ifdef CONFIG_SOFTMMU
 #error LLVM + SOFTMMU Not supported
@@ -264,6 +265,7 @@ static inline LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
         fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
         LLVMSetFunctionCallConv(fn, l->tbcallconv);
         LLVMAddAttributeAtIndex(fn, 1 + l->tbargs, l->noalias);
+        //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->alwaysinline);
     }
     return fn;
 }
@@ -790,12 +792,13 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
             } else {
                 //printf("tb_name=%s g=%p\n", tb_name, g);
                 LLVMSetInitializer(g, CONST(1, 1));
+                //LLVMRunFunctionPassManager(l->fpm, fn);
             }
         }
 
         qemu_log("LLVMRunPassManager bgein!\n");
         //dump_module(tmp_mod);
-        LLVMRunPassManager(l->pm, tmp_mod);
+        LLVMRunPassManager(l->mpm, tmp_mod);
         dump_module(tmp_mod);
         qemu_log("LLVMRunPassManager end!\n");
 
@@ -855,22 +858,17 @@ void tcg_llvm_context_init(TCGContext *s)
     l->tbldr = LLVMCreateBuilderInContext(l->ctx);
     l->jd = LLVMOrcLLJITGetMainJITDylib(l->jit);
 
-    l->pm = LLVMCreatePassManager();
-    LLVMAddPromoteMemoryToRegisterPass(l->pm);
-    LLVMAddBasicAliasAnalysisPass(l->pm);
-    LLVMAddCFGSimplificationPass(l->pm);
-    LLVMAddInstructionCombiningPass(l->pm);
-    LLVMAddReassociatePass(l->pm);
-    LLVMAddInstructionCombiningPass(l->pm);
-    LLVMAddGVNPass(l->pm);
-    LLVMAddTailCallEliminationPass(l->pm);
-    LLVMAddCFGSimplificationPass(l->pm);
-    LLVMAddInstructionCombiningPass(l->pm);
-    LLVMAddDeadStoreEliminationPass(l->pm);
+    l->pmb = LLVMPassManagerBuilderCreate();
+    l->mpm = LLVMCreatePassManager();
+    LLVMPassManagerBuilderSetOptLevel(l->pmb, 2);
+    LLVMPassManagerBuilderUseInlinerWithThreshold(l->pmb, 10000);
+    //LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, l->fpm);
+    LLVMPassManagerBuilderPopulateModulePassManager(l->pmb, l->mpm);
 
 #define GET_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
-    l->noreturn = LLVMCreateEnumAttribute(l->ctx, GET_KINDID("noreturn"), 0);
     l->noalias = LLVMCreateEnumAttribute(l->ctx, GET_KINDID("noalias"), 0);
+    l->alwaysinline = LLVMCreateEnumAttribute(l->ctx,
+        GET_KINDID("alwaysinline"), 0);
 #undef GET_KINDID
 
 
@@ -878,7 +876,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->hot_limit1 = 2000;
     l->hot_limit2 = 20000;
 
-    l->tbcallconv = 18;
+    l->tbcallconv = 10;
 
     l->tbargs = 0;
     LLVMTypeRef args[l->tbargs + 1];
@@ -918,6 +916,7 @@ void tcg_llvm_context_init(TCGContext *s)
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, "prologue"));
     l->prologue = (void *)addr;
+    //log_disas((void *)addr, 50);
 }
 
 void tcg_llvm_init(void)
