@@ -119,6 +119,8 @@ F: softmmu/cpus.c
 F: cpus-common.c
 F: accel/tcg/
 F: accel/stubs/tcg-stub.c
+F: util/cacheinfo.c
+F: util/cacheflush.c
 F: scripts/decodetree.py
 F: docs/devel/decodetree.rst
 F: include/exec/cpu*.h
@@ -1159,6 +1161,9 @@ M: Huacai Chen <chenhuacai@kernel.org>
 R: Jiaxun Yang <jiaxun.yang@flygoat.com>
 S: Maintained
 F: hw/intc/loongson_liointc.c
+F: hw/mips/loongson3_bootp.c
+F: hw/mips/loongson3_bootp.h
+F: hw/mips/loongson3_virt.c
 
 Boston
 M: Paul Burton <paulburton@kernel.org>
@@ -1680,6 +1685,8 @@ F: hw/ppc/ppc4*.c
 F: hw/i2c/ppc4xx_i2c.c
 F: include/hw/ppc/ppc4xx.h
 F: include/hw/i2c/ppc4xx_i2c.h
+F: hw/intc/ppc-uic.c
+F: include/hw/intc/ppc-uic.h
 
 Character devices
 M: Marc-André Lureau <marcandre.lureau@redhat.com>
