@@ -27,22 +27,25 @@ typedef struct TCGLLVMContext {
     LLVMContextRef ctx;
     LLVMBuilderRef bldr;
     LLVMBuilderRef ebldr; /* builder for function entry block */
-    LLVMBuilderRef tbldr; /* builder for temporary purpose */
     LLVMOrcJITDylibRef jd;
     LLVMPassManagerBuilderRef pmb;
     //LLVMPassManagerRef fpm;
     LLVMPassManagerRef mpm;
 
-
     /* Convenient values */
     LLVMAttributeRef noalias;
     LLVMAttributeRef alwaysinline;
-    int tbargs;
+
+    /* Translate block */
+    int nfastreg;
+    signed char *tbregmap;
+
     LLVMTypeRef tbtype;
     unsigned tbcallconv;
 
     /* Temporary values */
     LLVMValueRef temps[TCG_MAX_TEMPS];
+    LLVMValueRef *fastreg;
     LLVMModuleRef mod;
     LLVMValueRef fn;
     LLVMValueRef env;

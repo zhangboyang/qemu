@@ -87,9 +87,21 @@
 /* Convert pointers */
 #define P2I(p) LLVMBuildPtrToInt(BLDR, p, INTTY(HBITS), "")
 #define I2P(i, bits) LLVMBuildIntToPtr(BLDR, i, PTRTY(INTTY(bits)), "")
-/* Convert integer+offset to pointer */
-#define II2P(i1, i2, bits) I2P(ADD(i1, i2), bits)
-#define PI2P(p, i, bits) II2P(P2I(p), i, bits)
+
+/* Convert i8* + offset to pointer, using GEP and bitcast */
+#define PI2P(ptr, off, bits, name) ({ \
+        LLVMValueRef off_value = (off); \
+        LLVMBuildBitCast(BLDR, \
+            LLVMBuildInBoundsGEP2(BLDR, \
+                INTTY(8), \
+                ptr, \
+                &off_value, 1, \
+                "" \
+            ), \
+            PTRTY(INTTY(bits)), \
+            name \
+        ); \
+    })
 
 /* Extend or truncate integers */
 #define TRUNC(val, dst_bits) LLVMBuildTrunc(BLDR, val, INTTY(dst_bits), "")
@@ -102,7 +114,7 @@
 
 
 /* Map TCG Condition to LLVM Integer Predicate */
-static inline LLVMIntPredicate map_cond(TCGCond tcg_cond)
+static LLVMIntPredicate map_cond(TCGCond tcg_cond)
 {
     switch (tcg_cond) {
     case TCG_COND_EQ:  return LLVMIntEQ;
@@ -170,8 +182,13 @@ static LLVMValueRef call_intrinsic(TCGLLVMContext *l, const char *name, ...)
     return LLVMBuildCall(l->bldr, fn, arg, narg, "");
 }
 
+static bool is_env(TCGArg arg)
+{
+    TCGTemp *ts = arg_temp(arg);
+    return ts->temp_global && strcmp(ts->name, "env") == 0;
+}
 /* Get L-value of tcg-op arg */
-static inline LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
+static LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
 {
 /* Definitions and initializations should in entry basic block
  * So define builder to l->ebldr which is pointed to entry basic block */
@@ -187,27 +204,25 @@ static inline LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
                 /* env is a function argument */
                 ST(P2I(l->env), l->temps[idx]);
             } else {
-                LLVMValueRef off, gep;
-                LLVMTypeRef dst_ty;
-
+                LLVMValueRef off;
                 if (strcmp(ts->mem_base->name, "env") != 0) {
                     tcg_abort(); /* TODO: non-env global temp */
                 }
-                
-                switch (ts->type) {
-                case TCG_TYPE_I32: dst_ty = PTRTY(INTTY(32)); break;
-                case TCG_TYPE_I64: dst_ty = PTRTY(INTTY(64)); break;
-                default:
-                    tcg_abort();
+                if (l->tbregmap[ts->mem_offset] < 0) {
+                    off = CONSTH(ts->mem_offset);
+                    switch (ts->type) {
+                    case TCG_TYPE_I32:
+                        l->temps[idx] = PI2P(l->env, off, 32, ts->name); break;
+                    case TCG_TYPE_I64:
+                        l->temps[idx] = PI2P(l->env, off, 64, ts->name); break;
+                    default:
+                        tcg_abort();
+                    }
+                } else {
+                    l->temps[idx] = l->fastreg[l->tbregmap[ts->mem_offset]];
+                    if (ts->type == TCG_TYPE_I32) tcg_debug_assert(GBITS == 32);
+                    if (ts->type == TCG_TYPE_I64) tcg_debug_assert(GBITS == 64);
                 }
-                
-                off = CONSTH(ts->mem_offset);
-                gep = LLVMBuildInBoundsGEP2(BLDR,
-                    INTTY(8),
-                    l->env,
-                    &off, 1,
-                    "");
-                l->temps[idx] = LLVMBuildBitCast(BLDR, gep, dst_ty, ts->name);
             }
         }
         return l->temps[idx];
@@ -229,7 +244,7 @@ static inline LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
 }
 
 /* Get basic block of tcg-op arg label */
-static inline LLVMBasicBlockRef get_label(TCGLLVMContext *l, TCGArg arg)
+static LLVMBasicBlockRef get_label(TCGLLVMContext *l, TCGArg arg)
 {
     TCGLabel *label = arg_label(arg);
     if (!label->llvm_bb) {
@@ -241,7 +256,7 @@ static inline LLVMBasicBlockRef get_label(TCGLLVMContext *l, TCGArg arg)
 }
 
 /* Finish current block and switch builder to the given block */
-static inline void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
+static void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
 {
     if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(l->bldr))) {
         LLVMBuildBr(l->bldr, next_bb);
@@ -250,12 +265,12 @@ static inline void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
 }
 
 #define MAX_TB_NAME 128
-static inline void make_tb_name(char *tb_name, const char *t, target_ulong pc)
+static void make_tb_name(char *tb_name, const char *t, target_ulong pc)
 {
     sprintf(tb_name, "%s_%016" PRIx64, t, (uint64_t) pc);
 }
 
-static inline LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
+static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
 {
     LLVMValueRef fn;
     char tb_name[MAX_TB_NAME];
@@ -264,12 +279,12 @@ static inline LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
     if (!fn) {
         fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
         LLVMSetFunctionCallConv(fn, l->tbcallconv);
-        LLVMAddAttributeAtIndex(fn, 1 + l->tbargs, l->noalias);
+        LLVMAddAttributeAtIndex(fn, 1 + l->nfastreg, l->noalias);
         //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->alwaysinline);
     }
     return fn;
 }
-static inline LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
+static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
 {
     LLVMValueRef g;
     char tb_name[MAX_TB_NAME];
@@ -281,6 +296,46 @@ static inline LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
         LLVMSetLinkage(g, LLVMWeakAnyLinkage);
     }
     return g;
+}
+
+static void init_fastreg(TCGLLVMContext *l, bool use_arg)
+{
+    unsigned i;
+    LLVMValueRef envreg, *fastreg;
+    for (i = 0; i < sizeof(CPUArchState); i++) {
+        int fr = l->tbregmap[i];
+        if (fr < 0) continue;
+        fastreg = &l->fastreg[fr];
+#define BLDR (l->ebldr)
+        envreg = PI2P(l->env, CONSTH(i), GBITS, "");
+        *fastreg = ALLOCA(GBITS, "");
+        if (use_arg) {
+            ST(LLVMGetParam(l->fn, fr), *fastreg);
+        } else {
+            ST(LD(envreg), *fastreg);
+        }
+#undef BLDR
+    }
+}
+static void sync_fastreg(TCGLLVMContext *l, bool to_env)
+{
+    unsigned i;
+    LLVMValueRef envreg, *fastreg;
+    for (i = 0; i < sizeof(CPUArchState); i++) {
+        int fr = l->tbregmap[i];
+        if (fr < 0) continue;
+        fastreg = &l->fastreg[fr];
+#define BLDR (l->bldr)
+        envreg = PI2P(l->env, CONSTH(i), GBITS, "");
+        if (to_env) {
+            ST(LD(*fastreg), envreg);
+            ST(LLVMGetUndef(ELETY(TYOF(*fastreg))), *fastreg);
+        } else {
+            ST(LD(envreg), *fastreg);
+            ST(LLVMGetUndef(ELETY(TYOF(envreg))), envreg);
+        }
+#undef BLDR
+    }
 }
 
 void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
@@ -296,7 +351,7 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
     }
     l->fn = get_tb_func(l, tb->pc);
     get_tb_stub(l, tb->pc);
-    l->env = LLVMGetParam(l->fn, l->tbargs);
+    l->env = LLVMGetParam(l->fn, l->nfastreg);
 
     entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
     body_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "body");
@@ -304,7 +359,8 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
     LLVMPositionBuilderBefore(l->ebldr, LLVMBuildBr(l->ebldr, body_bb));
     LLVMPositionBuilderAtEnd(l->bldr, body_bb);
 
-    
+    init_fastreg(l, true);
+
     QTAILQ_FOREACH(op, &s->ops, link) {
         const TCGOpDef *def;
         TCGOpcode c;
@@ -361,7 +417,10 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
             break;
         
 #define OP_LD(src_bits, dst_bits, ext_kind) \
-    ST0(EXTEND(LD(II2P(ARG1R, ARG2C, src_bits)), dst_bits, ext_kind))
+do { \
+    tcg_debug_assert(is_env(ARG1)); \
+    ST0(EXTEND(LD(PI2P(l->env, ARG2C, src_bits, "")), dst_bits, ext_kind)); \
+} while (0)
         case INDEX_op_ld8u_i32:   OP_LD( 8, 32, Z); break;
         case INDEX_op_ld8s_i32:   OP_LD( 8, 32, S); break;
         case INDEX_op_ld16u_i32:  OP_LD(16, 32, Z); break;
@@ -378,7 +437,10 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
 #endif
 
 #define OP_ST(bits) \
-    ST(TRUNC(ARG0R, bits), II2P(ARG1R, ARG2C, bits))
+do { \
+    tcg_debug_assert(is_env(ARG1)); \
+    ST(TRUNC(ARG0R, bits), PI2P(l->env, ARG2C, bits, "")); \
+} while (0)
         case INDEX_op_st8_i32:   OP_ST( 8); break;
         case INDEX_op_st16_i32:  OP_ST(16); break;
         case INDEX_op_st_i32:    OP_ST(32); break;
@@ -647,6 +709,7 @@ do { \
     ST0(EXTEND(LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind))
 #define OP_QEMU_LD(bits) \
 do { \
+    tcg_debug_assert(guest_base == 0); \
     switch (get_memop(ARG2) & (MO_BSWAP | MO_SSIZE)) { \
     case MO_UB:   OP_QEMU_LD_HELPER( 8, bits, Z); break; \
     case MO_SB:   OP_QEMU_LD_HELPER( 8, bits, S); break; \
@@ -669,6 +732,7 @@ do { \
 #if HBITS == 64
         case INDEX_op_qemu_st_i64:
 #endif
+            tcg_debug_assert(guest_base == 0);
             switch (get_memop(ARG2) & (MO_BSWAP | MO_SSIZE)) {
             case MO_UB:   OP_QEMU_ST_HELPER( 8); break;
             case MO_LEUW: OP_QEMU_ST_HELPER(16); break;
@@ -704,10 +768,12 @@ do { \
                 CONSTH(op->args[nb_oargs + nb_iargs]),
                 PTRTY(fn_ty), "");
 
+            sync_fastreg(l, true);
             result = LLVMBuildCall(BLDR, fn, args, nb_iargs, "");
             if (nb_oargs) {
                 ST0(result);
             }
+            sync_fastreg(l, false);
             break;
         }
 
@@ -724,10 +790,11 @@ do { \
             target_ulong next_pc = ARG1;
             LLVMBasicBlockRef bb_exist = NEWBB("");
             LLVMBasicBlockRef bb_notexist = NEWBB("");
-            LLVMValueRef args[l->tbargs + 1];
+            LLVMValueRef args[l->nfastreg + 1];
             LLVMValueRef next_tb;
             LLVMValueRef exist_flag;
             LLVMValueRef result;
+            int i;
 
             next_tb = LD(get_tb_stub(l, next_pc));
             exist_flag = LLVMBuildICmp(BLDR, LLVMIntNE,
@@ -735,8 +802,11 @@ do { \
             CONDBR(exist_flag, bb_exist, bb_notexist);
 
             switch_bb(l, bb_exist);
-            args[l->tbargs] = l->env;
-            result = LLVMBuildCall(BLDR, next_tb, args, l->tbargs + 1, "");
+            for (i = 0; i < l->nfastreg; i++) {
+                args[i] = LD(l->fastreg[i]);
+            }
+            args[l->nfastreg] = l->env;
+            result = LLVMBuildCall(BLDR, next_tb, args, l->nfastreg + 1, "");
             LLVMSetInstructionCallConv(result, l->tbcallconv);
             LLVMBuildRet(BLDR, result);
 
@@ -744,9 +814,11 @@ do { \
             break;
         }
         case INDEX_op_goto_ptr:
+            sync_fastreg(l, true);
             LLVMBuildRet(BLDR, CONST(HBITS, 0));
             break;
         case INDEX_op_exit_tb:
+            sync_fastreg(l, true);
             LLVMBuildRet(BLDR, AND(ARG0C, CONST(HBITS, TB_EXIT_MASK)));
             break;
 #undef BLDR
@@ -800,7 +872,7 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 
 
         qemu_log("LLVMRunPassManager bgein!\n");
-        //dump_module(tmp_mod);
+        dump_module(tmp_mod);
 
         LLVMPassManagerRef fpm = LLVMCreateFunctionPassManagerForModule(tmp_mod);
         LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, fpm);
@@ -815,7 +887,7 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
         LLVMDisposePassManager(fpm);
         
         LLVMRunPassManager(l->mpm, tmp_mod);
-        //dump_module(tmp_mod);
+        dump_module(tmp_mod);
         qemu_log("LLVMRunPassManager end!\n");
 
         tsm = LLVMOrcCreateNewThreadSafeModule(tmp_mod, l->tsctx);
@@ -899,7 +971,6 @@ void tcg_llvm_context_init(TCGContext *s)
     l->ctx = LLVMOrcThreadSafeContextGetContext(l->tsctx);
     l->bldr = LLVMCreateBuilderInContext(l->ctx);
     l->ebldr = LLVMCreateBuilderInContext(l->ctx);
-    l->tbldr = LLVMCreateBuilderInContext(l->ctx);
     l->jd = LLVMOrcLLJITGetMainJITDylib(l->jit);
 
 
@@ -923,45 +994,62 @@ void tcg_llvm_context_init(TCGContext *s)
 
     l->tbcallconv = 10;
 
-    l->tbargs = 0;
-    LLVMTypeRef args[l->tbargs + 1];
+    LLVMTypeRef args[l->nfastreg + 1];
     int i;
-    for (i = 0; i < l->tbargs; i++) {
+    l->nfastreg = 8;
+    l->tbregmap = g_malloc(sizeof(CPUArchState));
+    memset(l->tbregmap, -1, sizeof(CPUArchState));
+    l->fastreg = g_malloc_n(l->nfastreg, sizeof(LLVMValueRef));
+    for (i = 0; i < l->nfastreg; i++) {
+        l->tbregmap[i * (GBITS / 8)] = i;
+    }
+    for (i = 0; i < l->nfastreg; i++) {
         args[i] = INTTY(GBITS);
     }
-    args[l->tbargs] = PTRTY(INTTY(8));
-    l->tbtype = LLVMFunctionType(INTTY(HBITS), args, l->tbargs + 1, 0);
+    args[l->nfastreg] = PTRTY(INTTY(8));
+    l->tbtype = LLVMFunctionType(INTTY(HBITS), args, l->nfastreg + 1, 0);
 
 
     LLVMModuleRef prologue_mod;
-    LLVMValueRef prologue_fn;
-    LLVMValueRef prologue_argvl[l->tbargs + 1];
+    LLVMValueRef prologue_argvl[l->nfastreg + 1];
     LLVMValueRef prologue_call;
     LLVMTypeRef prologue_type;
     LLVMTypeRef prologue_argty[2]; /* prologue(func, env) */
     LLVMOrcThreadSafeModuleRef tsm;
     LLVMOrcJITTargetAddress addr;
+    LLVMBasicBlockRef entry_bb, body_bb;
     prologue_argty[0] = prologue_argty[1] = PTRTY(INTTY(8));
     prologue_mod = LLVMModuleCreateWithNameInContext("prologue", l->ctx);
     prologue_type = LLVMFunctionType(INTTY(HBITS), prologue_argty, 2, 0);
-    prologue_fn = LLVMAddFunction(prologue_mod, "prologue", prologue_type);
-    prologue_argvl[l->tbargs] = LLVMGetParam(prologue_fn, 1);
-    LLVMPositionBuilderAtEnd(l->tbldr,
-        LLVMAppendBasicBlockInContext(l->ctx, prologue_fn, "entry"));
-    prologue_call = LLVMBuildCall(l->tbldr,
-        LLVMBuildBitCast(l->tbldr,
-            LLVMGetParam(prologue_fn, 0),
+    l->fn = LLVMAddFunction(prologue_mod, "prologue", prologue_type);
+    entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
+    body_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "body");
+    LLVMPositionBuilderAtEnd(l->ebldr, entry_bb);
+    LLVMPositionBuilderBefore(l->ebldr, LLVMBuildBr(l->ebldr, body_bb));
+    LLVMPositionBuilderAtEnd(l->bldr, body_bb);
+    l->env = LLVMGetParam(l->fn, 1);
+    init_fastreg(l, false);
+#define BLDR (l->bldr)
+    for (i = 0; i < l->nfastreg; i++) {
+        prologue_argvl[i] = LD(l->fastreg[i]);
+    }
+    prologue_argvl[l->nfastreg] = l->env;
+    prologue_call = LLVMBuildCall(l->bldr,
+        LLVMBuildBitCast(l->bldr,
+            LLVMGetParam(l->fn, 0),
             LLVMPointerType(l->tbtype, 0), ""),
-        prologue_argvl, l->tbargs + 1, "");
+        prologue_argvl, l->nfastreg + 1, "");
     LLVMSetInstructionCallConv(prologue_call, l->tbcallconv);
-    LLVMBuildRet(l->tbldr, prologue_call);
-    LLVMVerifyFunction(prologue_fn, LLVMAbortProcessAction);
+    LLVMBuildRet(l->bldr, prologue_call);
+    LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+    LLVMRunPassManager(l->mpm, prologue_mod);
     //dump_module(prologue_mod);
     tsm = LLVMOrcCreateNewThreadSafeModule(prologue_mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, "prologue"));
     l->prologue = (void *)addr;
     //log_disas((void *)addr, 50);
+#undef BLDR
 }
 
 void tcg_llvm_init(void)
