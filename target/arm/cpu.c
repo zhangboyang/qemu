@@ -54,7 +54,8 @@ static void arm_cpu_set_pc(CPUState *cs, vaddr value)
     }
 }
 
-static void arm_cpu_synchronize_from_tb(CPUState *cs, TranslationBlock *tb)
+static void arm_cpu_synchronize_from_tb(CPUState *cs,
+                                        const TranslationBlock *tb)
 {
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
@@ -1304,8 +1305,6 @@ static void arm_cpu_finalizefn(Object *obj)
     }
 #ifndef CONFIG_USER_ONLY
     if (cpu->pmu_timer) {
-        timer_del(cpu->pmu_timer);
-        timer_deinit(cpu->pmu_timer);
         timer_free(cpu->pmu_timer);
     }
 #endif
