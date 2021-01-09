@@ -33,8 +33,10 @@ typedef struct TCGLLVMContext {
     LLVMPassManagerRef mpm;
 
     /* Convenient values */
-    LLVMAttributeRef noalias;
-    LLVMAttributeRef alwaysinline;
+    LLVMAttributeRef attr_noalias;
+    unsigned md_aliasscope;
+    unsigned md_noalias;
+    LLVMValueRef env_scope;
 
     /* Translate block */
     int nfastreg;

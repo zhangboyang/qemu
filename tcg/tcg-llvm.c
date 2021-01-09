@@ -55,11 +55,25 @@
 #define CONST(bits, c) LLVMConstInt(INTTY(bits), c, 0)
 #define CONSTH(c) CONST(HBITS, c)
 
+/* Alias scope */
+#define SCOPE_ENV(v) ({ \
+    LLVMValueRef __v = (v); \
+    LLVMSetMetadata(__v, l->md_aliasscope, l->env_scope); \
+    __v; \
+})
+#define NOALIAS_ENV(v) ({ \
+    LLVMValueRef __v = (v); \
+    LLVMSetMetadata(__v, l->md_noalias, l->env_scope); \
+    __v; \
+})
+
 /* Load and Store */
 #undef LD
 #undef ST
-#define LD(ptr) LLVMBuildLoad(BLDR, ptr, "")
-#define ST(val, ptr) LLVMBuildStore(BLDR, val, ptr)
+#define LD(ptr) SCOPE_ENV(LLVMBuildLoad(BLDR, ptr, ""))
+#define ST(val, ptr) SCOPE_ENV(LLVMBuildStore(BLDR, val, ptr))
+#define NOALIAS_LD(ptr) NOALIAS_ENV(LLVMBuildLoad(BLDR, ptr, ""))
+#define NOALIAS_ST(val, ptr) NOALIAS_ENV(LLVMBuildStore(BLDR, val, ptr))
 
 /* Arith Ops */
 #define ADD(x, y) LLVMBuildAdd(BLDR, x, y, "")
@@ -279,8 +293,7 @@ static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
     if (!fn) {
         fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
         LLVMSetFunctionCallConv(fn, l->tbcallconv);
-        LLVMAddAttributeAtIndex(fn, 1 + l->nfastreg, l->noalias);
-        //LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->alwaysinline);
+        LLVMAddAttributeAtIndex(fn, 1 + l->nfastreg, l->attr_noalias);
     }
     return fn;
 }
@@ -706,7 +719,7 @@ do { \
 
 // XXX: memory barrier!!! and endian swap
 #define OP_QEMU_LD_HELPER(src_bits, dst_bits, ext_kind) \
-    ST0(EXTEND(LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind))
+    ST0(EXTEND(NOALIAS_LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind))
 #define OP_QEMU_LD(bits) \
 do { \
     tcg_debug_assert(guest_base == 0); \
@@ -727,7 +740,7 @@ do { \
 #endif
 
 #define OP_QEMU_ST_HELPER(bits) \
-    ST(TRUNC(ARG0R, bits), I2P(ARG1R, bits))
+    NOALIAS_ST(TRUNC(ARG0R, bits), I2P(ARG1R, bits))
         case INDEX_op_qemu_st_i32:
 #if HBITS == 64
         case INDEX_op_qemu_st_i64:
@@ -981,12 +994,19 @@ void tcg_llvm_context_init(TCGContext *s)
     //LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, l->fpm);
     LLVMPassManagerBuilderPopulateModulePassManager(l->pmb, l->mpm);
 
-#define GET_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
-    l->noalias = LLVMCreateEnumAttribute(l->ctx, GET_KINDID("noalias"), 0);
-    l->alwaysinline = LLVMCreateEnumAttribute(l->ctx,
-        GET_KINDID("alwaysinline"), 0);
-#undef GET_KINDID
+#define ATTR_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
+    l->attr_noalias = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("noalias"), 0);
+#undef ATTR_KINDID
+    
+#define MD_KINDID(s) LLVMGetMDKindIDInContext(l->ctx, s, strlen(s))
+    l->md_aliasscope = MD_KINDID("alias.scope");
+    l->md_noalias = MD_KINDID("noalias");
+#undef MD_KINDID
+    LLVMMetadataRef alias_domain = LLVMMDNodeInContext2(l->ctx, NULL, 0);
+    l->env_scope = LLVMMetadataAsValue(l->ctx, LLVMMDNodeInContext2(l->ctx, &alias_domain, 1));
 
+    //printf("%u %u\n", l->md_aliasscope, l->md_noalias);
 
     QLIST_INIT(&l->hot_tb);
     l->hot_limit1 = 2000;
@@ -996,7 +1016,7 @@ void tcg_llvm_context_init(TCGContext *s)
 
     LLVMTypeRef args[l->nfastreg + 1];
     int i;
-    l->nfastreg = 8;
+    l->nfastreg = 0;
     l->tbregmap = g_malloc(sizeof(CPUArchState));
     memset(l->tbregmap, -1, sizeof(CPUArchState));
     l->fastreg = g_malloc_n(l->nfastreg, sizeof(LLVMValueRef));
