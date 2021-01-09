@@ -34,6 +34,7 @@ typedef struct TCGLLVMContext {
 
     /* Convenient values */
     LLVMAttributeRef attr_noalias;
+    LLVMAttributeRef attr_qemuenv;
     unsigned md_aliasscope;
     unsigned md_noalias;
     LLVMValueRef env_scope;

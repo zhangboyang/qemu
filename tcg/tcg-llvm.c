@@ -294,6 +294,7 @@ static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
         fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
         LLVMSetFunctionCallConv(fn, l->tbcallconv);
         LLVMAddAttributeAtIndex(fn, 1 + l->nfastreg, l->attr_noalias);
+        LLVMAddAttributeAtIndex(fn, 1 + l->nfastreg, l->attr_qemuenv);
     }
     return fn;
 }
@@ -997,14 +998,19 @@ void tcg_llvm_context_init(TCGContext *s)
 #define ATTR_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
     l->attr_noalias = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("noalias"), 0);
+    l->attr_qemuenv = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("dereferenceable"), sizeof(CPUArchState));
 #undef ATTR_KINDID
     
 #define MD_KINDID(s) LLVMGetMDKindIDInContext(l->ctx, s, strlen(s))
     l->md_aliasscope = MD_KINDID("alias.scope");
     l->md_noalias = MD_KINDID("noalias");
 #undef MD_KINDID
-    LLVMMetadataRef alias_domain = LLVMMDNodeInContext2(l->ctx, NULL, 0);
-    l->env_scope = LLVMMetadataAsValue(l->ctx, LLVMMDNodeInContext2(l->ctx, &alias_domain, 1));
+    LLVMMetadataRef domain_name = LLVMMDStringInContext2(l->ctx, "dom", strlen("dom"));
+    LLVMMetadataRef domain = LLVMMDNodeInContext2(l->ctx, &domain_name, 1);
+    LLVMMetadataRef scope_arg[2] = {LLVMMDStringInContext2(l->ctx, "scope", strlen("scope")), domain};
+    LLVMMetadataRef scope = LLVMMDNodeInContext2(l->ctx, scope_arg, 2);
+    l->env_scope = LLVMMetadataAsValue(l->ctx, LLVMMDNodeInContext2(l->ctx, &scope, 1));
 
     //printf("%u %u\n", l->md_aliasscope, l->md_noalias);
 
@@ -1013,10 +1019,10 @@ void tcg_llvm_context_init(TCGContext *s)
     l->hot_limit2 = 20000;
 
     l->tbcallconv = 10;
+    l->nfastreg = 9;
 
     LLVMTypeRef args[l->nfastreg + 1];
     int i;
-    l->nfastreg = 0;
     l->tbregmap = g_malloc(sizeof(CPUArchState));
     memset(l->tbregmap, -1, sizeof(CPUArchState));
     l->fastreg = g_malloc_n(l->nfastreg, sizeof(LLVMValueRef));
