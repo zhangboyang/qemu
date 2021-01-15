@@ -476,10 +476,15 @@ struct TranslationBlock {
     uint32_t trace_vcpu_dstate;
 
     struct tb_tc tc;
+
 #ifdef CONFIG_TCG_LLVM
     void *llvm_tc;
     uint64_t exec_count;
-    QLIST_ENTRY(TranslationBlock) hot_link;
+    struct {
+        GByteArray *temp_buf;
+        GByteArray *op_buf;
+        char *digest;
+    } packed_tcg;
 #endif
 
     /* original tb when cflags has CF_NOCACHE */

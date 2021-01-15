@@ -989,6 +989,10 @@ void tcg_context_init(TCGContext *s)
     memset(s, 0, sizeof(*s));
     s->nb_globals = 0;
 
+#ifdef CONFIG_TCG_LLVM
+    tcg_llvm_context_init(s);
+#endif
+
     /* Count total number of arguments and allocate the corresponding
        space */
     total_args = 0;
@@ -1016,6 +1020,14 @@ void tcg_context_init(TCGContext *s)
                             (gpointer)&all_helpers[i]);
     }
 
+#ifdef CONFIG_TCG_LLVM
+    for (i = 0; i < ARRAY_SIZE(all_helpers); ++i) {
+        tcg_llvm_register_helper(s, i, all_helpers[i].func);
+    }
+    tcg_llvm_register_helper_done(s);
+#endif
+    
+
     tcg_target_init(s);
     process_op_defs(s);
 
@@ -1035,10 +1047,6 @@ void tcg_context_init(TCGContext *s)
     }
 
     alloc_tcg_plugin_context(s);
-
-#ifdef CONFIG_TCG_LLVM
-    tcg_llvm_context_init(s);
-#endif
 
     tcg_ctx = s;
     /*
@@ -2101,6 +2109,15 @@ static inline const char *tcg_find_helper(TCGContext *s, uintptr_t val)
     }
     return ret;
 }
+int helper_idx(uintptr_t val)
+{
+    TCGHelperInfo *info = g_hash_table_lookup(helper_table, (gpointer)val);
+    if (!info) {
+        tcg_abort();
+    }
+    return info - all_helpers;
+}
+
 
 static const char * const cond_name[] =
 {
@@ -4538,7 +4555,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb)
 #endif
 
 #ifdef CONFIG_TCG_LLVM
-    tcg_llvm_gen_code(s, tb);
+    tcg_llvm_serialize_tb(s, tb);
 #endif
 
     tcg_reg_alloc_start(s);

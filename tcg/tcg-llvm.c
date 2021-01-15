@@ -28,10 +28,167 @@
 #define CAT3(x, y, z) CAT(CAT(x, y), z)
 
 
+static void serialize(GByteArray *buf, const void *mem, size_t size)
+{
+    g_byte_array_append(buf, mem, size);
+}
+static void deserialize(const guint8 **buf, void *mem, size_t size)
+{
+    memcpy(mem, *buf, size);
+    *buf += size;
+}
+
+static void serialize_temp(GByteArray *temp_buf, TCGContext *s, TCGTemp *ts)
+{
+    TCGTempKind kind = ts->kind;
+    TCGType type = ts->type;
+    int mem_base;
+    intptr_t mem_offset;
+    int name_id;
+    int64_t val;
+    serialize(temp_buf, &kind, sizeof(kind));
+    serialize(temp_buf, &type, sizeof(type));
+    switch (kind) {
+    case TEMP_GLOBAL: case TEMP_FIXED:
+        mem_base = ts->mem_base ? temp_idx(ts->mem_base) : -1;
+        serialize(temp_buf, &mem_base, sizeof(mem_base));
+        mem_offset = ts->mem_offset;
+        serialize(temp_buf, &mem_offset, sizeof(mem_offset));
+        serialize(temp_buf, ts->name, strlen(ts->name) + 1);
+        break;
+    case TEMP_LOCAL: case TEMP_NORMAL:
+        name_id = temp_idx(ts) - s->nb_globals;
+        serialize(temp_buf, &name_id, sizeof(name_id));
+        break;
+    case TEMP_CONST:
+        val = ts->val;
+        serialize(temp_buf, &val, sizeof(val));
+        break;
+    }
+}
+static void deserialize_temp(const guint8 **temp_buf, TCGLLVMTemp *t)
+{
+    int name_id;
+    deserialize(temp_buf, &t->kind, sizeof(t->kind));
+    deserialize(temp_buf, &t->type, sizeof(t->type));
+    switch (t->kind) {
+    case TEMP_GLOBAL: case TEMP_FIXED:
+        deserialize(temp_buf, &t->mem_base, sizeof(t->mem_base));
+        deserialize(temp_buf, &t->mem_offset, sizeof(t->mem_offset));
+        snprintf(t->name, sizeof(t->name), "%s", (char *) *temp_buf);
+        *temp_buf += strlen((char *) *temp_buf) + 1;
+        break;
+    case TEMP_LOCAL: case TEMP_NORMAL:
+        deserialize(temp_buf, &name_id, sizeof(name_id));
+        snprintf(t->name, sizeof(t->name), "%s%d",
+            t->kind == TEMP_LOCAL ? "loc" : "tmp", name_id);
+        break;
+    case TEMP_CONST:
+        deserialize(temp_buf, &t->val, sizeof(t->val));
+        break;
+    }
+}
+
+static bool carg_is_label[NB_OPS][MAX_OPC_PARAM] = {
+    [INDEX_op_set_label][0] = true,
+    [INDEX_op_br][0] = true,
+    [INDEX_op_brcond_i32][1] = true,
+    [INDEX_op_brcond_i64][1] = true,
+    [INDEX_op_brcond2_i32][1] = true,
+};
+#define carg_is_helper(opc, carg) ((opc) == INDEX_op_call && (carg) == 0)
+#define carg_is_exitcode(opc, carg) ((opc) == INDEX_op_exit_tb && (carg) == 0)
+static void serialize_op(GByteArray *op_buf, TCGOp *op, bool *temp_used)
+{
+    TCGOpcode c = op->opc;
+    const TCGOpDef *def = &tcg_op_defs[c];
+    int nb_oargs = def->nb_oargs;
+    int nb_iargs = def->nb_iargs;
+    int nb_cargs = def->nb_cargs;
+    int i, j;
+    serialize(op_buf, &c, sizeof(c));
+    if (c == INDEX_op_call) {
+        nb_oargs = TCGOP_CALLO(op);
+        nb_iargs = TCGOP_CALLI(op);
+        serialize(op_buf, &nb_oargs, sizeof(nb_oargs));
+        serialize(op_buf, &nb_iargs, sizeof(nb_iargs));
+    }
+    for (i = 0; i < nb_oargs + nb_iargs; i++) {
+        int idx = temp_idx(arg_temp(op->args[i]));
+        serialize(op_buf, &idx, sizeof(idx));
+        temp_used[idx] = true;
+    }
+    for (j = 0; j < nb_cargs; i++, j++) {
+        uint64_t carg = op->args[i];
+        if (carg_is_label[c][j]) {
+            carg = arg_label(op->args[i])->id;
+        }
+        if (carg_is_helper(c, j)) {
+            carg = helper_idx(op->args[i]);
+        }
+        if (carg_is_exitcode(c, j)) {
+            carg = carg & TB_EXIT_MASK;
+        }
+        serialize(op_buf, &carg, sizeof(carg));
+    }
+}
+static void deserialize_op(const guint8 **op_buf,
+    TCGOpcode *c, int *nb_oargs, int *nb_iargs, int *nb_cargs, uint64_t *args)
+{
+    const TCGOpDef *def;
+    int i, j;
+    deserialize(op_buf, c, sizeof(*c));
+    def = &tcg_op_defs[*c];
+    *nb_oargs = def->nb_oargs;
+    *nb_iargs = def->nb_iargs;
+    *nb_cargs = def->nb_cargs;
+    if (*c == INDEX_op_call) {
+        deserialize(op_buf, nb_oargs, sizeof(*nb_oargs));
+        deserialize(op_buf, nb_iargs, sizeof(*nb_iargs));
+    }
+    for (i = 0; i < *nb_oargs + *nb_iargs; i++) {
+        uint32_t idx;
+        deserialize(op_buf, &idx, sizeof(idx));
+        args[i] = idx;
+    }
+    for (j = 0; j < *nb_cargs; i++, j++) {
+        deserialize(op_buf, &args[i], sizeof(args[i]));
+    }
+}
+
+void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb)
+{
+    TCGLLVMContext *l = s->llvm_ctx;
+    TCGOp *op;
+    bool temp_used[TCG_MAX_TEMPS] = {};
+    int idx;
+    GByteArray *temp_buf = tb->packed_tcg.temp_buf;
+    GByteArray *op_buf = tb->packed_tcg.op_buf;
+
+    QTAILQ_FOREACH(op, &s->ops, link) {
+        serialize_op(op_buf, op, temp_used);
+    }
+
+    for (idx = 0; idx < TCG_MAX_TEMPS; idx++) {
+        if (temp_used[idx]) {
+            serialize(temp_buf, &idx, sizeof(idx));
+            serialize_temp(temp_buf, s, &s->temps[idx]);
+        }
+    }
+
+    g_checksum_reset(l->hasher);
+    g_checksum_update(l->hasher, temp_buf->data, temp_buf->len);
+    g_checksum_update(l->hasher, op_buf->data, op_buf->len);
+    tb->packed_tcg.digest = g_strdup(g_checksum_get_string(l->hasher));
+}
+
+
+
 
 /* LLVM convenient macros */
 
 /* Context */
+#define BLDR (l->bldr)
 #define CTX (l->ctx)
 #define FN (l->fn)
 
@@ -203,97 +360,16 @@ static LLVMValueRef call_intrinsic(TCGLLVMContext *l, const char *name, ...)
     return LLVMBuildCall(l->bldr, fn, arg, narg, "");
 }
 
-static bool is_env(TCGArg arg)
-{
-    TCGTemp *ts = arg_temp(arg);
-    return ts->kind == TEMP_FIXED && strcmp(ts->name, "env") == 0;
-}
-/* Get L-value of tcg-op arg */
-static LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
-{
-/* Definitions and initializations should in entry basic block
- * So define builder to l->ebldr which is pointed to entry basic block */
-#define BLDR (l->ebldr)
-    TCGTemp *ts = arg_temp(arg);
-    int idx = temp_idx(ts);
-
-    switch (ts->kind) {
-    case TEMP_FIXED:
-    case TEMP_GLOBAL:
-        if (!l->temps[idx]) {
-            /* Assign initial value */
-            if (strcmp(ts->name, "env") == 0) {
-                l->temps[idx] = ALLOCAH(ts->name);
-                /* env is a function argument */
-                ST(P2I(l->env), l->temps[idx]);
-            } else {
-                LLVMValueRef off;
-                if (strcmp(ts->mem_base->name, "env") != 0) {
-                    tcg_abort(); /* TODO: non-env global temp */
-                }
-                if (l->tbregmap[ts->mem_offset] < 0) {
-                    off = CONSTH(ts->mem_offset);
-                    switch (ts->type) {
-                    case TCG_TYPE_I32:
-                        l->temps[idx] = PI2P(l->env, off, 32, ts->name); break;
-                    case TCG_TYPE_I64:
-                        l->temps[idx] = PI2P(l->env, off, 64, ts->name); break;
-                    default:
-                        tcg_abort();
-                    }
-                } else {
-                    l->temps[idx] = l->fastreg[l->tbregmap[ts->mem_offset]];
-                    if (ts->type == TCG_TYPE_I32) tcg_debug_assert(GBITS == 32);
-                    if (ts->type == TCG_TYPE_I64) tcg_debug_assert(GBITS == 64);
-                }
-            }
-        }
-        return l->temps[idx];
-    case TEMP_LOCAL:
-    case TEMP_NORMAL:
-        if (!l->temps[idx]) {
-            char buf[100];
-            sprintf(buf, "%s%d", 
-                ts->kind == TEMP_LOCAL ? "loc" : "tmp",
-                idx - l->s->nb_globals);
-            switch (ts->type) {
-            case TCG_TYPE_I32: l->temps[idx] = ALLOCA(32, buf); break;
-            case TCG_TYPE_I64: l->temps[idx] = ALLOCA(64, buf); break;
-            default: tcg_abort();
-            }
-        }
-        return l->temps[idx];
-    case TEMP_CONST:
-        if (!l->temps[idx]) {
-            switch (ts->type) {
-            case TCG_TYPE_I32:
-                l->temps[idx] = ALLOCA(32, "");
-                ST(CONST(32, ts->val), l->temps[idx]);
-                break;
-            case TCG_TYPE_I64:
-                l->temps[idx] = ALLOCA(64, "");
-                ST(CONST(64, ts->val), l->temps[idx]);
-                break;
-            default: tcg_abort();
-            }
-        }
-        return l->temps[idx];
-    default:
-        tcg_abort();
-    }
-#undef BLDR
-}
 
 /* Get basic block of tcg-op arg label */
-static LLVMBasicBlockRef get_label(TCGLLVMContext *l, TCGArg arg)
+static LLVMBasicBlockRef get_label(TCGLLVMContext *l, unsigned label_id)
 {
-    TCGLabel *label = arg_label(arg);
-    if (!label->llvm_bb) {
-        char buf[100];
-        sprintf(buf, "L%d", label->id);
-        label->llvm_bb = NEWBB(buf);
+    if (!g_hash_table_contains(l->labels, GINT_TO_POINTER(label_id))) {
+        char buf[32];
+        sprintf(buf, "L%u", label_id);
+        g_hash_table_insert(l->labels, GINT_TO_POINTER(label_id), NEWBB(buf));
     }
-    return label->llvm_bb;
+    return g_hash_table_lookup(l->labels, GINT_TO_POINTER(label_id));
 }
 
 /* Finish current block and switch builder to the given block */
@@ -305,20 +381,39 @@ static void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
     LLVMPositionBuilderAtEnd(l->bldr, next_bb);
 }
 
-#define MAX_TB_NAME 128
-static void make_tb_name(char *tb_name, const char *t, target_ulong pc)
+#define MAX_SYMNAME 128
+static void make_helper_symbol(char *symname, int idx)
 {
-    sprintf(tb_name, "%s_%016" PRIx64, t, (uint64_t) pc);
+    snprintf(symname, MAX_SYMNAME, "helper_%d", idx);
+}
+
+static LLVMValueRef get_helper(TCGLLVMContext *l, int idx)
+{
+    LLVMValueRef g;
+    char symname[MAX_SYMNAME];
+    make_helper_symbol(symname, idx);
+    g = LLVMGetNamedGlobal(l->mod, symname);
+    if (!g) {
+        g = LLVMAddGlobal(l->mod, INTTY(8), symname);
+        LLVMSetLinkage(g, LLVMExternalLinkage);
+    }
+    return g;
+}
+
+
+static void make_tb_symbol(char *symname, const char *t, target_ulong pc)
+{
+    snprintf(symname, MAX_SYMNAME, "%s_%016" PRIx64, t, (uint64_t) pc);
 }
 
 static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
 {
     LLVMValueRef fn;
-    char tb_name[MAX_TB_NAME];
-    make_tb_name(tb_name, "tb", pc);
-    fn = LLVMGetNamedFunction(l->mod, tb_name);
+    char symname[MAX_SYMNAME];
+    make_tb_symbol(symname, "tb", pc);
+    fn = LLVMGetNamedFunction(l->mod, symname);
     if (!fn) {
-        fn = LLVMAddFunction(l->mod, tb_name, l->tbtype);
+        fn = LLVMAddFunction(l->mod, symname, l->tbtype);
         LLVMSetFunctionCallConv(fn, l->tbcallconv);
         LLVMAddAttributeAtIndex(fn, 1 + l->nfastreg, l->attr_noalias);
         LLVMAddAttributeAtIndex(fn, 1 + l->nfastreg, l->attr_qemuenv);
@@ -328,11 +423,11 @@ static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
 static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
 {
     LLVMValueRef g;
-    char tb_name[MAX_TB_NAME];
-    make_tb_name(tb_name, "stub", pc);
-    g = LLVMGetNamedGlobal(l->mod, tb_name);
+    char symname[MAX_SYMNAME];
+    make_tb_symbol(symname, "stub", pc);
+    g = LLVMGetNamedGlobal(l->mod, symname);
     if (!g) {
-        g = LLVMAddGlobal(l->mod, PTRTY(l->tbtype), tb_name);
+        g = LLVMAddGlobal(l->mod, PTRTY(l->tbtype), symname);
         LLVMSetInitializer(g, LLVMConstPointerNull(PTRTY(l->tbtype)));
         LLVMSetLinkage(g, LLVMWeakAnyLinkage);
     }
@@ -347,7 +442,6 @@ static void init_fastreg(TCGLLVMContext *l, bool use_arg)
         int fr = l->tbregmap[i];
         if (fr < 0) continue;
         fastreg = &l->fastreg[fr];
-#define BLDR (l->ebldr)
         envreg = PI2P(l->env, CONSTH(i), GBITS, "");
         *fastreg = ALLOCA(GBITS, "");
         if (use_arg) {
@@ -355,7 +449,6 @@ static void init_fastreg(TCGLLVMContext *l, bool use_arg)
         } else {
             ST(LD(envreg), *fastreg);
         }
-#undef BLDR
     }
 }
 static void sync_fastreg(TCGLLVMContext *l, bool to_env)
@@ -366,7 +459,6 @@ static void sync_fastreg(TCGLLVMContext *l, bool to_env)
         int fr = l->tbregmap[i];
         if (fr < 0) continue;
         fastreg = &l->fastreg[fr];
-#define BLDR (l->bldr)
         envreg = PI2P(l->env, CONSTH(i), GBITS, "");
         if (to_env) {
             ST(LD(*fastreg), envreg);
@@ -375,59 +467,119 @@ static void sync_fastreg(TCGLLVMContext *l, bool to_env)
             ST(LD(envreg), *fastreg);
             ST(LLVMGetUndef(ELETY(TYOF(envreg))), envreg);
         }
-#undef BLDR
     }
 }
 
-void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
+static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
 {
-    TCGLLVMContext *l = s->llvm_ctx;
-    LLVMBasicBlockRef entry_bb, body_bb;
-    TCGOp *op;
-    
-    memset(l->temps, 0, sizeof(l->temps));
-    
-    if (l->mod == NULL) {
-        l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
-    }
-    l->fn = get_tb_func(l, tb->pc);
-    get_tb_stub(l, tb->pc);
-    l->env = LLVMGetParam(l->fn, l->nfastreg);
+    LLVMBasicBlockRef bb;
+    LLVMValueRef stub;
+    const guint8 *buf, *buf_end;
 
-    entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
-    body_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "body");
-    LLVMPositionBuilderAtEnd(l->ebldr, entry_bb);
-    LLVMPositionBuilderBefore(l->ebldr, LLVMBuildBr(l->ebldr, body_bb));
-    LLVMPositionBuilderAtEnd(l->bldr, body_bb);
+    memset(l->temps, 0, sizeof(l->temps));
+    g_hash_table_remove_all(l->labels);
+
+    l->fn = get_tb_func(l, tb->pc);
+    stub = get_tb_stub(l, tb->pc); // FIXME
+    LLVMSetInitializer(stub, l->fn);
+    //LLVMSetGlobalConstant(stub, 1);
+    //LLVMSetLinkage(stub, LLVMWeakAnyLinkage);
+
+    l->env = LLVMGetParam(l->fn, l->nfastreg);
+    bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
+    LLVMPositionBuilderAtEnd(l->bldr, bb);
 
     init_fastreg(l, true);
 
-    QTAILQ_FOREACH(op, &s->ops, link) {
-        const TCGOpDef *def;
-        TCGOpcode c;
-        
-        c = op->opc;
-        def = &tcg_op_defs[c];
+#define is_env(idx) (strcmp(l->temps[idx].name, "env") == 0)
+    buf = tb->packed_tcg.temp_buf->data;
+    buf_end = buf + tb->packed_tcg.temp_buf->len;
+    while (buf < buf_end) {
+        int idx;
+        TCGLLVMTemp *t;
+        deserialize(&buf, &idx, sizeof(idx));
+        t = &l->temps[idx];
+        deserialize_temp(&buf, t);
 
+        switch (t->kind) {
+        case TEMP_FIXED:
+        case TEMP_GLOBAL:
+            /* Assign initial value */
+            if (is_env(idx)) {
+                t->solt = ALLOCAH(t->name);
+                /* env is a function argument */
+                ST(P2I(l->env), t->solt);
+            } else {
+                if (!is_env(t->mem_base)) {
+                    tcg_abort();
+                }
+                LLVMValueRef off;
+                if (l->tbregmap[t->mem_offset] < 0) {
+                    off = CONSTH(t->mem_offset);
+                    switch (t->type) {
+                    case TCG_TYPE_I32:
+                        t->solt = PI2P(l->env, off, 32, t->name); break;
+                    case TCG_TYPE_I64:
+                        t->solt = PI2P(l->env, off, 64, t->name); break;
+                    default: tcg_abort();
+                    }
+                } else {
+                    t->solt = l->fastreg[l->tbregmap[t->mem_offset]];
+                    if (t->type == TCG_TYPE_I32 && GBITS != 32) tcg_abort();
+                    if (t->type == TCG_TYPE_I64 && GBITS != 64) tcg_abort();
+                }
+            }
+            break;
+        case TEMP_LOCAL:
+        case TEMP_NORMAL:
+            switch (t->type) {
+            case TCG_TYPE_I32:
+                t->solt = ALLOCA(32, t->name); break;
+            case TCG_TYPE_I64:
+                t->solt = ALLOCA(64, t->name); break;
+            default: tcg_abort();
+            }
+            break;
+        case TEMP_CONST:
+            switch (t->type) {
+            case TCG_TYPE_I32:
+                ST(CONST(32, t->val), (t->solt = ALLOCA(32, ""))); break;
+            case TCG_TYPE_I64:
+                ST(CONST(64, t->val), (t->solt = ALLOCA(64, ""))); break;
+            default: tcg_abort();
+            }
+            break;
+        }
+        qemu_log("%x:%p\n", idx, t->solt);
+    }
+
+    buf = tb->packed_tcg.op_buf->data;
+    buf_end = buf + tb->packed_tcg.op_buf->len;
+    while (buf < buf_end) {
+        TCGOpcode c;
+        const TCGOpDef *def;
+        int nb_oargs, nb_iargs, nb_cargs;
+        uint64_t op_args[MAX_OPC_PARAM] = {};
+        deserialize_op(&buf, &c, &nb_oargs, &nb_iargs, &nb_cargs, op_args);
+        def = &tcg_op_defs[c];
         qemu_log(">>%s\n", def->name);
 
         switch (c) {
-#define BLDR (l->bldr)
 
 /* op args */
-#define ARG0 op->args[0]
-#define ARG1 op->args[1]
-#define ARG2 op->args[2]
-#define ARG3 op->args[3]
-#define ARG4 op->args[4]
-#define ARG5 op->args[5]
+#define ARG0 op_args[0]
+#define ARG1 op_args[1]
+#define ARG2 op_args[2]
+#define ARG3 op_args[3]
+#define ARG4 op_args[4]
+#define ARG5 op_args[5]
 /* L-value of op args */
-#define ARG0L  get_lvalue(l, ARG0)
-#define ARG1L  get_lvalue(l, ARG1)
-#define ARG2L  get_lvalue(l, ARG2)
-#define ARG3L  get_lvalue(l, ARG3)
-#define ARG4L  get_lvalue(l, ARG4)
-#define ARG5L  get_lvalue(l, ARG5)
+#define ARG0L  l->temps[ARG0].solt
+#define ARG1L  l->temps[ARG1].solt
+#define ARG2L  l->temps[ARG2].solt
+#define ARG3L  l->temps[ARG3].solt
+#define ARG4L  l->temps[ARG4].solt
+#define ARG5L  l->temps[ARG5].solt
 /* R-value of op args */
 #define ARG0R  LD(ARG0L)
 #define ARG1R  LD(ARG1L)
@@ -782,29 +934,27 @@ do { \
             break;
 
         case INDEX_op_call: {
-            int i, nb_oargs, nb_iargs;
+            int i;
             LLVMTypeRef ret_ty;
             LLVMTypeRef args_ty[MAX_OPC_PARAM_IARGS];
             LLVMTypeRef fn_ty;
             LLVMValueRef args[MAX_OPC_PARAM_IARGS];
             LLVMValueRef fn, result;
 
-            nb_oargs = TCGOP_CALLO(op);
-            nb_iargs = TCGOP_CALLI(op);
             if (nb_oargs > 1) {
-                tcg_abort();
+                tcg_abort(); /* TODO */
             }
             
             for (i = 0; i < nb_iargs; i++) {
-                LLVMValueRef lval = get_lvalue(l, op->args[nb_oargs + i]);
+                LLVMValueRef lval = l->temps[op_args[nb_oargs + i]].solt;
                 args_ty[i] = ELETY(TYOF(lval));
                 args[i] = LD(lval);
             }
             
             ret_ty = nb_oargs ? ELETY(TYOF(ARG0L)) : VOIDTY;
             fn_ty = LLVMFunctionType(ret_ty, args_ty, nb_iargs, 0);
-            fn = LLVMBuildIntToPtr(BLDR,
-                CONSTH(op->args[nb_oargs + nb_iargs]),
+            fn = LLVMBuildBitCast(BLDR,
+                get_helper(l, op_args[nb_oargs + nb_iargs]),
                 PTRTY(fn_ty), "");
 
             sync_fastreg(l, true);
@@ -824,7 +974,6 @@ do { \
             tcg_abort();
             break;
 
-        // TODO
         case INDEX_op_goto_tb: {
             target_ulong next_pc = ARG1;
             LLVMBasicBlockRef bb_exist = NEWBB("");
@@ -858,9 +1007,8 @@ do { \
             break;
         case INDEX_op_exit_tb:
             sync_fastreg(l, true);
-            LLVMBuildRet(BLDR, AND(ARG0C, CONST(HBITS, TB_EXIT_MASK)));
+            LLVMBuildRet(BLDR, ARG0C);
             break;
-#undef BLDR
         }
     }
 
@@ -869,100 +1017,72 @@ do { \
 
 }
 
+static void batch_compile(TCGLLVMContext *l)
+{
+    TranslationBlock *tb;
+    LLVMOrcThreadSafeModuleRef tsm;
+    LLVMOrcJITTargetAddress func_addr, stub_addr;
+    char symname[MAX_SYMNAME];
+    unsigned long i;
+
+    qemu_log("batch compile!\n");
+    l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
+
+    for (i = 0; i < l->hot_tb->len; i++) {
+        tb = g_ptr_array_index(l->hot_tb, i);
+        gen_code(l, tb);
+    }
+
+    qemu_log("LLVMRunPassManager bgein!\n");
+    LLVMRunPassManager(l->mpm, l->mod);
+    dump_module(l->mod);
+    qemu_log("LLVMRunPassManager end!\n");
+
+    tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
+    check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
+
+
+    for (i = 0; i < l->hot_tb->len; i++) {
+        tb = g_ptr_array_index(l->hot_tb, i);
+
+        make_tb_symbol(symname, "stub", tb->pc);
+        check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
+        make_tb_symbol(symname, "tb", tb->pc);
+        check_error(LLVMOrcLLJITLookup(l->jit, &func_addr, symname));
+
+        tb->llvm_tc = (void *)func_addr;
+        *(void **)stub_addr = (void *)func_addr;
+
+        qemu_log("%s = %p; %" PRIu64 "; %s\n", symname, tb->llvm_tc, tb->exec_count, tb->packed_tcg.digest);
+        /*unsigned char *ptr = tb->packed_tcg.op_buf->data;
+        int len = tb->packed_tcg.op_buf->len;
+        for (int p = 0; p < len; p++) {
+            if (p % 16 == 0) {
+                if (p) qemu_log("\n");
+                qemu_log("%04x: ", p);
+            }
+            qemu_log("%02x ", ptr[p]);
+        }
+        qemu_log("\n");*/
+    }
+
+    qemu_log("compile done! (%u compiled)\n", l->hot_tb->len);
+    g_ptr_array_set_size(l->hot_tb, 0);
+}
+
 bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
     CPUArchState *env, uintptr_t *ret)
 {
     TCGLLVMContext *l = s->llvm_ctx;
-
     if (!tb->llvm_tc) {
-        LLVMOrcThreadSafeModuleRef tsm;
-        LLVMOrcJITTargetAddress gaddr, addr;
-        uint64_t tb_count = 0;
-        char tb_name[MAX_TB_NAME];
-        TranslationBlock *htb, *nhtb;
-
-        tb->exec_count++;
+        if (tb->exec_count == l->hot_limit1) {
+            g_ptr_array_add(l->hot_tb, tb);
+        }
         if (tb->exec_count < l->hot_limit2) {
+            tb->exec_count++;
             return false;
         }
-
-        
-        qemu_log("trigger compile!\n");
-        //dump_module(l->mod);
-        LLVMModuleRef tmp_mod = LLVMCloneModule(l->mod); // XXX
-
-        qemu_log("find hot code!\n");
-
-        QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
-            make_tb_name(tb_name, "tb", htb->pc);
-            LLVMValueRef fn = LLVMGetNamedFunction(tmp_mod, tb_name);
-            make_tb_name(tb_name, "stub", htb->pc);
-            LLVMValueRef g = LLVMGetNamedGlobal(tmp_mod, tb_name);
-            if (htb->exec_count < l->hot_limit1) {
-                LLVMReplaceAllUsesWith(fn, LLVMGetUndef(LLVMTypeOf(fn)));
-                LLVMDeleteFunction(fn);
-            } else {
-                //printf("tb_name=%s g=%p\n", tb_name, g);
-                LLVMSetInitializer(g, fn);
-                LLVMSetLinkage(g, LLVMInternalLinkage);
-                LLVMSetGlobalConstant(g, 1);
-            }
-        }
-
-
-        qemu_log("LLVMRunPassManager bgein!\n");
-        dump_module(tmp_mod);
-
-        LLVMPassManagerRef fpm = LLVMCreateFunctionPassManagerForModule(tmp_mod);
-        LLVMPassManagerBuilderPopulateFunctionPassManager(l->pmb, fpm);
-        QLIST_FOREACH(htb, &l->hot_tb, hot_link) {
-            if (htb->exec_count < l->hot_limit1) {
-                continue;
-            }
-            make_tb_name(tb_name, "tb", htb->pc);
-            LLVMValueRef fn = LLVMGetNamedFunction(tmp_mod, tb_name);
-            LLVMRunFunctionPassManager(fpm, fn);
-        }
-        LLVMDisposePassManager(fpm);
-        
-        LLVMRunPassManager(l->mpm, tmp_mod);
-        dump_module(tmp_mod);
-        qemu_log("LLVMRunPassManager end!\n");
-
-        tsm = LLVMOrcCreateNewThreadSafeModule(tmp_mod, l->tsctx);
-        check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
-
-
-        QLIST_FOREACH_SAFE(htb, &l->hot_tb, hot_link, nhtb) {
-            if (htb->exec_count < l->hot_limit1) {
-                continue;
-            }
-            tb_count++;
-            QLIST_REMOVE(htb, hot_link);
-
-            make_tb_name(tb_name, "tb", htb->pc);
-            LLVMValueRef fn = LLVMGetNamedFunction(l->mod, tb_name);
-            make_tb_name(tb_name, "stub", htb->pc);
-            LLVMValueRef g = LLVMGetNamedGlobal(l->mod, tb_name);
-            LLVMSetInitializer(g, fn);
-            LLVMSetLinkage(g, LLVMInternalLinkage);
-            LLVMSetGlobalConstant(g, 1);
-            LLVMErrorRef gerr = LLVMOrcLLJITLookup(l->jit, &gaddr, tb_name);
-
-            make_tb_name(tb_name, "tb", htb->pc);
-            QLLVMDeleteFunctionBody(LLVMGetNamedFunction(l->mod, tb_name));
-            check_error(LLVMOrcLLJITLookup(l->jit, &addr, tb_name));
-            qemu_log("%s = %p; %" PRIu64 "\n", tb_name, (void *)addr, htb->exec_count);
-            //log_disas((void *)addr, 200);
-            htb->llvm_tc = (void *)addr;
-            if (gerr) {
-                LLVMConsumeError(gerr);
-            } else {
-                *(void **)gaddr = (void *)addr;
-            }
-        }
-
-        qemu_log("compile done! (%" PRIu64 " compiled)\n", tb_count);
+        batch_compile(l);
     }
     //qemu_log("llvm exec! begin\n");
     *ret = l->prologue(tb->llvm_tc, env);
@@ -974,12 +1094,38 @@ void tcg_llvm_init_tb(TCGContext *s, TranslationBlock *tb)
 {
     tb->llvm_tc = NULL;
     tb->exec_count = 0;
-    QLIST_INSERT_HEAD(&s->llvm_ctx->hot_tb, tb, hot_link);
+    tb->packed_tcg.temp_buf = g_byte_array_new();
+    tb->packed_tcg.op_buf = g_byte_array_new();
+    tb->packed_tcg.digest = NULL;
 }
 void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb)
 {
     qemu_log("tb %p removed!\n", tb);
-    QLIST_REMOVE(tb, hot_link);
+    /* TODO: free tb->llvm_tc */
+    g_byte_array_free(tb->packed_tcg.temp_buf, TRUE);
+    g_byte_array_free(tb->packed_tcg.op_buf, TRUE);
+    g_free(tb->packed_tcg.digest);
+}
+
+void tcg_llvm_register_helper(TCGContext *s, int idx, void *func)
+{
+    TCGLLVMContext *l = s->llvm_ctx;
+    LLVMJITCSymbolMapPair *sympair;
+    char symname[MAX_SYMNAME];
+    make_helper_symbol(symname, idx);
+    if (idx >= l->helpers->len) {
+        g_array_set_size(l->helpers, idx + 1);
+    }
+
+    sympair = &g_array_index(l->helpers, LLVMJITCSymbolMapPair, idx);
+    sympair->Name = LLVMOrcExecutionSessionIntern(l->es, symname);
+    sympair->Sym.Address = (LLVMOrcJITTargetAddress) func;
+}
+void tcg_llvm_register_helper_done(TCGContext *s)
+{
+    TCGLLVMContext *l = s->llvm_ctx;
+    check_error(LLVMOrcJITDylibDefine(l->jd,
+        LLVMOrcAbsoluteSymbols((void *) l->helpers->data, l->helpers->len)));
 }
 
 static LLVMOrcObjectLayerRef create_oll(
@@ -999,7 +1145,6 @@ void tcg_llvm_context_init(TCGContext *s)
 {
     TCGLLVMContext *l = g_malloc0(sizeof(*l));
     s->llvm_ctx = l;
-    l->s = s;
     
     LLVMOrcLLJITBuilderRef jb;
     jb = LLVMOrcCreateLLJITBuilder();
@@ -1009,8 +1154,8 @@ void tcg_llvm_context_init(TCGContext *s)
     l->tsctx = LLVMOrcCreateNewThreadSafeContext();
     l->ctx = LLVMOrcThreadSafeContextGetContext(l->tsctx);
     l->bldr = LLVMCreateBuilderInContext(l->ctx);
-    l->ebldr = LLVMCreateBuilderInContext(l->ctx);
     l->jd = LLVMOrcLLJITGetMainJITDylib(l->jit);
+    l->es = LLVMOrcLLJITGetExecutionSession(l->jit);
 
 
     l->pmb = LLVMPassManagerBuilderCreate();
@@ -1039,7 +1184,10 @@ void tcg_llvm_context_init(TCGContext *s)
 
     //printf("%u %u\n", l->md_aliasscope, l->md_noalias);
 
-    QLIST_INIT(&l->hot_tb);
+    l->hasher = g_checksum_new(G_CHECKSUM_SHA256);
+    l->labels = g_hash_table_new(NULL, NULL);
+
+    l->hot_tb = g_ptr_array_new();
     l->hot_limit1 = 2000;
     l->hot_limit2 = 20000;
 
@@ -1068,19 +1216,15 @@ void tcg_llvm_context_init(TCGContext *s)
     LLVMTypeRef prologue_argty[2]; /* prologue(func, env) */
     LLVMOrcThreadSafeModuleRef tsm;
     LLVMOrcJITTargetAddress addr;
-    LLVMBasicBlockRef entry_bb, body_bb;
+    LLVMBasicBlockRef bb;
     prologue_argty[0] = prologue_argty[1] = PTRTY(INTTY(8));
     prologue_mod = LLVMModuleCreateWithNameInContext("prologue", l->ctx);
     prologue_type = LLVMFunctionType(INTTY(HBITS), prologue_argty, 2, 0);
     l->fn = LLVMAddFunction(prologue_mod, "prologue", prologue_type);
-    entry_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
-    body_bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "body");
-    LLVMPositionBuilderAtEnd(l->ebldr, entry_bb);
-    LLVMPositionBuilderBefore(l->ebldr, LLVMBuildBr(l->ebldr, body_bb));
-    LLVMPositionBuilderAtEnd(l->bldr, body_bb);
+    bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
+    LLVMPositionBuilderAtEnd(l->bldr, bb);
     l->env = LLVMGetParam(l->fn, 1);
     init_fastreg(l, false);
-#define BLDR (l->bldr)
     for (i = 0; i < l->nfastreg; i++) {
         prologue_argvl[i] = LD(l->fastreg[i]);
     }
@@ -1100,7 +1244,8 @@ void tcg_llvm_context_init(TCGContext *s)
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, "prologue"));
     l->prologue = (void *)addr;
     //log_disas((void *)addr, 50);
-#undef BLDR
+
+    l->helpers = g_array_new(FALSE, TRUE, sizeof(LLVMJITCSymbolMapPair));
 }
 
 void tcg_llvm_init(void)

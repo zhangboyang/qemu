@@ -34,9 +34,6 @@
 #include "tcg/tcg-mo.h"
 #include "tcg-target.h"
 #include "qemu/int128.h"
-#ifdef CONFIG_TCG_LLVM
-#include <llvm-c/Core.h>
-#endif
 
 /* XXX: make safe guess about sizes */
 #define MAX_OP_PER_INSTR 266
@@ -268,9 +265,6 @@ struct TCGLabel {
     } u;
     QSIMPLEQ_HEAD(, TCGRelocation) relocs;
     QSIMPLEQ_ENTRY(TCGLabel) next;
-#ifdef CONFIG_TCG_LLVM
-    LLVMBasicBlockRef llvm_bb;
-#endif
 };
 
 typedef struct TCGPool {
@@ -728,6 +722,8 @@ static inline void *tcg_splitwx_to_rw(const void *rx)
     return rx ? (void *)rx - tcg_splitwx_diff : NULL;
 }
 #endif
+
+int helper_idx(uintptr_t val);
 
 static inline size_t temp_idx(TCGTemp *ts)
 {
