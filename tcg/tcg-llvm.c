@@ -72,8 +72,15 @@
 #undef ST
 #define LD(ptr) SCOPE_ENV(LLVMBuildLoad(BLDR, ptr, ""))
 #define ST(val, ptr) SCOPE_ENV(LLVMBuildStore(BLDR, val, ptr))
-#define NOALIAS_LD(ptr) NOALIAS_ENV(LLVMBuildLoad(BLDR, ptr, ""))
-#define NOALIAS_ST(val, ptr) NOALIAS_ENV(LLVMBuildStore(BLDR, val, ptr))
+#define SET_VOLATILE(v) ({ \
+    LLVMValueRef __v = (v); \
+    LLVMSetVolatile(__v, 1); \
+    __v; \
+})
+#define QEMU_LD(ptr) \
+    SET_VOLATILE(NOALIAS_ENV(LLVMBuildLoad(BLDR, ptr, "")))
+#define QEMU_ST(val, ptr) \
+    SET_VOLATILE(NOALIAS_ENV(LLVMBuildStore(BLDR, val, ptr)))
 
 /* Arith Ops */
 #define ADD(x, y) LLVMBuildAdd(BLDR, x, y, "")
@@ -199,7 +206,7 @@ static LLVMValueRef call_intrinsic(TCGLLVMContext *l, const char *name, ...)
 static bool is_env(TCGArg arg)
 {
     TCGTemp *ts = arg_temp(arg);
-    return ts->temp_global && strcmp(ts->name, "env") == 0;
+    return ts->kind == TEMP_FIXED && strcmp(ts->name, "env") == 0;
 }
 /* Get L-value of tcg-op arg */
 static LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
@@ -210,7 +217,9 @@ static LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
     TCGTemp *ts = arg_temp(arg);
     int idx = temp_idx(ts);
 
-    if (ts->temp_global) {        
+    switch (ts->kind) {
+    case TEMP_FIXED:
+    case TEMP_GLOBAL:
         if (!l->temps[idx]) {
             /* Assign initial value */
             if (strcmp(ts->name, "env") == 0) {
@@ -240,11 +249,12 @@ static LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
             }
         }
         return l->temps[idx];
-    } else {
+    case TEMP_LOCAL:
+    case TEMP_NORMAL:
         if (!l->temps[idx]) {
             char buf[100];
             sprintf(buf, "%s%d", 
-                ts->temp_local ? "loc" : "tmp",
+                ts->kind == TEMP_LOCAL ? "loc" : "tmp",
                 idx - l->s->nb_globals);
             switch (ts->type) {
             case TCG_TYPE_I32: l->temps[idx] = ALLOCA(32, buf); break;
@@ -253,6 +263,23 @@ static LLVMValueRef get_lvalue(TCGLLVMContext *l, TCGArg arg)
             }
         }
         return l->temps[idx];
+    case TEMP_CONST:
+        if (!l->temps[idx]) {
+            switch (ts->type) {
+            case TCG_TYPE_I32:
+                l->temps[idx] = ALLOCA(32, "");
+                ST(CONST(32, ts->val), l->temps[idx]);
+                break;
+            case TCG_TYPE_I64:
+                l->temps[idx] = ALLOCA(64, "");
+                ST(CONST(64, ts->val), l->temps[idx]);
+                break;
+            default: tcg_abort();
+            }
+        }
+        return l->temps[idx];
+    default:
+        tcg_abort();
     }
 #undef BLDR
 }
@@ -382,7 +409,7 @@ void tcg_llvm_gen_code(TCGContext *s, TranslationBlock *tb)
         c = op->opc;
         def = &tcg_op_defs[c];
 
-        //qemu_log(">>%s\n", def->name);
+        qemu_log(">>%s\n", def->name);
 
         switch (c) {
 #define BLDR (l->bldr)
@@ -466,10 +493,8 @@ do { \
 #endif
 
         case INDEX_op_mov_i32:  ST0(TRUNC(ARG1R, 32)); break;
-        case INDEX_op_movi_i32: ST0(TRUNC(ARG1C, 32)); break;
 #if HBITS == 64
         case INDEX_op_mov_i64:  ST0(ARG1R); break;
-        case INDEX_op_movi_i64: ST0(ARG1C); break;
 #endif
 
         case INDEX_op_ext8s_i32:    ST0(TSEXT(ARG1R,  8, 32)); break;
@@ -720,7 +745,7 @@ do { \
 
 // XXX: memory barrier!!! and endian swap
 #define OP_QEMU_LD_HELPER(src_bits, dst_bits, ext_kind) \
-    ST0(EXTEND(NOALIAS_LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind))
+    ST0(EXTEND(QEMU_LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind))
 #define OP_QEMU_LD(bits) \
 do { \
     tcg_debug_assert(guest_base == 0); \
@@ -741,7 +766,7 @@ do { \
 #endif
 
 #define OP_QEMU_ST_HELPER(bits) \
-    NOALIAS_ST(TRUNC(ARG0R, bits), I2P(ARG1R, bits))
+    QEMU_ST(TRUNC(ARG0R, bits), I2P(ARG1R, bits))
         case INDEX_op_qemu_st_i32:
 #if HBITS == 64
         case INDEX_op_qemu_st_i64:
@@ -1019,7 +1044,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->hot_limit2 = 20000;
 
     l->tbcallconv = 10;
-    l->nfastreg = 9;
+    l->nfastreg = 8;
 
     LLVMTypeRef args[l->nfastreg + 1];
     int i;
