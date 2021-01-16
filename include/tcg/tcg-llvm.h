@@ -38,8 +38,8 @@ typedef struct TCGLLVMContext {
     LLVMOrcJITDylibRef jd;
     LLVMOrcExecutionSessionRef es;
     LLVMPassManagerBuilderRef pmb;
-    //LLVMPassManagerRef fpm;
     LLVMPassManagerRef mpm;
+    GArray *helpers;
     GChecksum *hasher;
 
     /* Convenient values */
@@ -48,24 +48,29 @@ typedef struct TCGLLVMContext {
     unsigned md_aliasscope;
     unsigned md_noalias;
     LLVMValueRef env_scope;
+    unsigned md_prof;
+    LLVMValueRef prof_likely;
 
     /* Translate block */
-    int nfastreg;
-    signed char *tbregmap;
-    LLVMTypeRef tbtype;
-    unsigned tbcallconv;
+    LLVMTypeRef tb_type;
+    unsigned tb_callconv;
+
+    /* Fast registers */
+    int nb_fastreg;
+    LLVMValueRef *fastreg;
+    signed char *regmap;
 
     /* Temporary values */
     TCGLLVMTemp temps[TCG_MAX_TEMPS];
     GHashTable *labels;
-    LLVMValueRef *fastreg;
     LLVMModuleRef mod;
     LLVMValueRef fn;
     LLVMValueRef env;
 
     /* Prologue */
     uintptr_t (*prologue)(void *func, CPUArchState *env);
-    GArray *helpers;
+    LLVMTypeRef epilogue_ty;
+    void *epilogue;
 
     /* Hot code finder */
     GPtrArray *hot_tb;

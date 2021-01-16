@@ -5,7 +5,6 @@
 
 /* Helpers for instruction counting code generation.  */
 
-static TCGOp *icount_start_insn;
 
 static inline void gen_io_start(void)
 {
@@ -31,6 +30,11 @@ static inline void gen_io_end(void)
                    offsetof(ArchCPU, env));
     tcg_temp_free_i32(tmp);
 }
+
+//#ifndef CONFIG_TCG_LLVM
+#if 1
+
+static TCGOp *icount_start_insn;
 
 static inline void gen_tb_start(const TranslationBlock *tb)
 {
@@ -83,5 +87,14 @@ static inline void gen_tb_end(const TranslationBlock *tb, int num_insns)
     gen_set_label(tcg_ctx->exitreq_label);
     tcg_gen_exit_tb(tb, TB_EXIT_REQUESTED);
 }
+
+#else /* CONFIG_TCG_LLVM */
+static inline void gen_tb_start(const TranslationBlock *tb)
+{
+}
+static inline void gen_tb_end(const TranslationBlock *tb, int num_insns)
+{
+}
+#endif /* CONFIG_TCG_LLVM */
 
 #endif
