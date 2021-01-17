@@ -409,29 +409,46 @@ static void make_tb_symbol(char *symname, const char *t, target_ulong pc)
 }
 static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
 {
-    LLVMValueRef g;
+    LLVMValueRef fn, stub;
     char symname[MAX_SYMNAME];
     make_tb_symbol(symname, "stub", pc);
-    g = LLVMGetNamedGlobal(l->mod, symname);
-    if (!g) {
-        g = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
-        LLVMSetInitializer(g, LLVMConstPointerNull(PTRTY(l->tb_type)));
-        LLVMSetLinkage(g, LLVMWeakAnyLinkage);
+    stub = LLVMGetNamedGlobal(l->mod, symname);
+    if (!stub) {
+        stub = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
+        if (g_hash_table_contains(l->tb_compiled, (void *)pc)) {
+            make_tb_symbol(symname, "tb", pc);
+            fn = LLVMAddFunction(l->mod, symname, l->tb_type);
+            LLVMSetFunctionCallConv(fn, l->tb_callconv);
+            LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
+            LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_qemuenv);
+            LLVMSetInitializer(stub, fn);
+            LLVMSetGlobalConstant(stub, 1);
+            LLVMSetLinkage(stub, LLVMInternalLinkage);
+        } else {
+            LLVMSetInitializer(stub, LLVMConstPointerNull(PTRTY(l->tb_type)));
+            LLVMSetLinkage(stub, LLVMWeakAnyLinkage);
+            g_hash_table_replace(l->tb_stubs, (void *)pc, GINT_TO_POINTER(
+                GPOINTER_TO_INT(g_hash_table_lookup(l->tb_stubs, (void *)pc)) + 1));
+        }
     }
-    return g;
+    return stub;
 }
 static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
 {
-    LLVMValueRef fn;
+    LLVMValueRef fn, stub;
     char symname[MAX_SYMNAME];
     make_tb_symbol(symname, "tb", pc);
-    fn = LLVMGetNamedFunction(l->mod, symname);
-    if (!fn) {
-        fn = LLVMAddFunction(l->mod, symname, l->tb_type);
-        LLVMSetFunctionCallConv(fn, l->tb_callconv);
-        LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
-        LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_qemuenv);
-    }
+    fn = LLVMAddFunction(l->mod, symname, l->tb_type);
+    LLVMSetFunctionCallConv(fn, l->tb_callconv);
+    LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
+    LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_qemuenv);
+    make_tb_symbol(symname, "stub", pc);
+    stub = LLVMGetNamedGlobal(l->mod, symname);
+    LLVMSetInitializer(stub, fn);
+    LLVMSetGlobalConstant(stub, 1);
+    LLVMSetLinkage(stub, LLVMInternalLinkage);
+    g_hash_table_replace(l->tb_stubs, (void *)pc, GINT_TO_POINTER(
+        GPOINTER_TO_INT(g_hash_table_lookup(l->tb_stubs, (void *)pc)) - 1));
     return fn;
 }
 static LLVMValueRef get_epilogue(TCGLLVMContext *l)
@@ -492,8 +509,8 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
     memset(l->temps, 0, sizeof(l->temps));
     g_hash_table_remove_all(l->labels);
 
-    l->fn = get_tb_func(l, tb->pc);
     stub = get_tb_stub(l, tb->pc); // FIXME
+    l->fn = get_tb_func(l, tb->pc);
     LLVMSetInitializer(stub, l->fn);
     //LLVMSetGlobalConstant(stub, 1);
     //LLVMSetLinkage(stub, LLVMWeakAnyLinkage);
@@ -563,7 +580,6 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
             }
             break;
         }
-        qemu_log("%x:%p\n", idx, t->solt);
     }
 
     buf = tb->packed_tcg.op_buf->data;
@@ -575,7 +591,6 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
         uint64_t op_args[MAX_OPC_PARAM] = {};
         deserialize_op(&buf, &c, &nb_oargs, &nb_iargs, &nb_cargs, op_args);
         def = &tcg_op_defs[c];
-        qemu_log(">>%s\n", def->name);
 
         switch (c) {
 
@@ -926,6 +941,7 @@ do { \
     } \
 } while (0)
         case INDEX_op_qemu_ld_i32: OP_QEMU_LD(32); break;
+            
 #if HBITS == 64
         case INDEX_op_qemu_ld_i64: OP_QEMU_LD(64); break;
 #endif
@@ -1056,6 +1072,7 @@ static void batch_compile(TCGLLVMContext *l)
     }
 
     qemu_log("LLVMRunPassManager bgein!\n");
+    //dump_module(l->mod);
     LLVMRunPassManager(l->mpm, l->mod);
     dump_module(l->mod);
     qemu_log("LLVMRunPassManager end!\n");
@@ -1067,14 +1084,19 @@ static void batch_compile(TCGLLVMContext *l)
     for (i = 0; i < l->hot_tb->len; i++) {
         tb = g_ptr_array_index(l->hot_tb, i);
 
-        make_tb_symbol(symname, "stub", tb->pc);
-        check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
         make_tb_symbol(symname, "tb", tb->pc);
         check_error(LLVMOrcLLJITLookup(l->jit, &func_addr, symname));
-
         tb->llvm_tc = (void *)func_addr;
-        *(void **)stub_addr = (void *)func_addr;
+        g_hash_table_add(l->tb_compiled, (void *)tb->pc);
 
+        if (g_hash_table_lookup(l->tb_stubs, (void *)tb->pc)) {
+            make_tb_symbol(symname, "stub", tb->pc);
+            check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
+            *(void **)stub_addr = (void *)func_addr;
+            g_hash_table_remove(l->tb_stubs, (void *)tb->pc);
+        }
+
+        make_tb_symbol(symname, "tb", tb->pc);
         qemu_log("%s = %p; %" PRIu64 "; %s\n", symname, tb->llvm_tc, tb->exec_count, tb->packed_tcg.digest);
         /*unsigned char *ptr = tb->packed_tcg.op_buf->data;
         int len = tb->packed_tcg.op_buf->len;
@@ -1198,16 +1220,16 @@ static void init_prologue(TCGLLVMContext *l)
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
     LLVMRunPassManager(l->mpm, l->mod);
-    dump_module(l->mod);
+    //dump_module(l->mod);
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, "prologue"));
     l->prologue = (void *)addr;
-    log_disas((void *)addr, 50);
+    //log_disas((void *)addr, 50);
     check_error(LLVMOrcLLJITLookup(l->jit, &addr, "epilogue"));
     l->epilogue = (void *)addr;
-    log_disas((void *)addr, 50);
+    //log_disas((void *)addr, 50);
 }
 
 static LLVMOrcObjectLayerRef create_oll_with_jitperf(
@@ -1280,9 +1302,12 @@ void tcg_llvm_context_init(TCGContext *s)
     l->hasher = g_checksum_new(G_CHECKSUM_SHA256);
     l->labels = g_hash_table_new(NULL, NULL);
 
+    l->tb_compiled = g_hash_table_new(NULL, NULL);
+    l->tb_stubs = g_hash_table_new(NULL, NULL);
+
     l->hot_tb = g_ptr_array_new();
-    l->hot_limit1 = 2000;
-    l->hot_limit2 = 20000;
+    l->hot_limit1 = 1000;
+    l->hot_limit2 = 10000;
 
     l->tb_callconv = 10; /* GHC-CC */
     l->nb_fastreg = 8;

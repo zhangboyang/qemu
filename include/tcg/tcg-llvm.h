@@ -55,6 +55,9 @@ typedef struct TCGLLVMContext {
     LLVMTypeRef tb_type;
     unsigned tb_callconv;
 
+    GHashTable *tb_compiled;
+    GHashTable *tb_stubs;
+
     /* Fast registers */
     int nb_fastreg;
     LLVMValueRef *fastreg;
