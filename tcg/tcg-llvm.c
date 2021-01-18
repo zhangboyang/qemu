@@ -1000,10 +1000,10 @@ do { \
 
             sync_fastreg(l, true);
             result = LLVMBuildCall2(l->bldr, fn_ty, fn, args, nb_iargs, "");
+            sync_fastreg(l, false);
             if (nb_oargs) {
                 ST0(result);
             }
-            sync_fastreg(l, false);
             break;
         }
 
