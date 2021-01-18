@@ -326,6 +326,19 @@ static inline void dump_module(LLVMModuleRef mdl)
     LLVMDisposeMessage(str);
 }
 
+static void set_tb_func_attr(TCGLLVMContext *l, LLVMValueRef fn)
+{
+    LLVMSetFunctionCallConv(fn, l->tb_callconv);
+    LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
+    LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_qemuenv);
+}
+static void set_tb_call_attr(TCGLLVMContext *l, LLVMValueRef instr)
+{
+    LLVMSetInstructionCallConv(instr, l->tb_callconv);
+    LLVMAddCallSiteAttribute(instr, l->nb_fastreg + 1, l->attr_noalias);
+    LLVMAddCallSiteAttribute(instr, l->nb_fastreg + 1, l->attr_qemuenv);
+}
+
 /* Build a call to llvm intrinsic
  *  call_intrinsic(l,
  *      "llvm.foo.bar",
@@ -418,9 +431,7 @@ static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
         if (g_hash_table_contains(l->tb_compiled, (void *)pc)) {
             make_tb_symbol(symname, "tb", pc);
             fn = LLVMAddFunction(l->mod, symname, l->tb_type);
-            LLVMSetFunctionCallConv(fn, l->tb_callconv);
-            LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
-            LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_qemuenv);
+            set_tb_func_attr(l, fn);
             LLVMSetInitializer(stub, fn);
             LLVMSetGlobalConstant(stub, 1);
             LLVMSetLinkage(stub, LLVMInternalLinkage);
@@ -439,9 +450,7 @@ static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
     char symname[MAX_SYMNAME];
     make_tb_symbol(symname, "tb", pc);
     fn = LLVMAddFunction(l->mod, symname, l->tb_type);
-    LLVMSetFunctionCallConv(fn, l->tb_callconv);
-    LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
-    LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_qemuenv);
+    set_tb_func_attr(l, fn);
     make_tb_symbol(symname, "stub", pc);
     stub = LLVMGetNamedGlobal(l->mod, symname);
     LLVMSetInitializer(stub, fn);
@@ -457,9 +466,7 @@ static LLVMValueRef get_epilogue(TCGLLVMContext *l)
     fn = LLVMGetNamedFunction(l->mod, "epilogue");
     if (!fn) {
         fn = LLVMAddFunction(l->mod, "epilogue", l->epilogue_ty);
-        LLVMSetFunctionCallConv(fn, l->tb_callconv);
-        LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
-        LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_qemuenv);
+        set_tb_func_attr(l, fn);
     }
     return fn;
 }
@@ -1020,7 +1027,7 @@ do { \
             }
             args[l->nb_fastreg] = l->env;
             result = LLVMBuildCall(BLDR, next_tb, args, l->nb_fastreg + 1, "");
-            LLVMSetInstructionCallConv(result, l->tb_callconv);
+            set_tb_call_attr(l, result);
             LLVMBuildRet(BLDR, result);
 
             switch_bb(l, bb_notexist);
@@ -1038,7 +1045,7 @@ do { \
             args[l->nb_fastreg + 1] = c == INDEX_op_exit_tb ? ARG0C : CONSTH(0);
             result = LLVMBuildCall(BLDR,
                 get_epilogue(l), args, l->nb_fastreg + 2, "");
-            LLVMSetInstructionCallConv(result, l->tb_callconv);
+            set_tb_call_attr(l, result);
             LLVMBuildRet(BLDR, result);
             break;
         }
@@ -1199,7 +1206,7 @@ static void init_prologue(TCGLLVMContext *l)
             LLVMGetParam(l->fn, 0),
             LLVMPointerType(l->tb_type, 0), ""),
         prologue_argvl, l->nb_fastreg + 1, "");
-    LLVMSetInstructionCallConv(prologue_call, l->tb_callconv);
+    set_tb_call_attr(l, prologue_call);
     LLVMBuildRet(l->bldr, prologue_call);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
