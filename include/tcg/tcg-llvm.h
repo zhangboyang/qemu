@@ -44,7 +44,7 @@ typedef struct TCGLLVMContext {
 
     /* Convenient values */
     LLVMAttributeRef attr_noalias;
-    LLVMAttributeRef attr_qemuenv;
+    LLVMAttributeRef attr_vaildenv;
     unsigned md_aliasscope;
     unsigned md_noalias;
     LLVMValueRef env_scope;
@@ -72,8 +72,7 @@ typedef struct TCGLLVMContext {
     LLVMValueRef env;
 
     /* Prologue */
-    uintptr_t (*prologue)(void *func, CPUArchState *env);
-    LLVMTypeRef epilogue_ty;
+    void (*prologue)(void *func, CPUArchState *env);
     void *epilogue;
 
     /* Hot code finder */
@@ -92,7 +91,7 @@ void tcg_llvm_context_init(TCGContext *s);
 void tcg_llvm_init(void);
 
 
-void QLLVMDeleteFunctionBody(LLVMValueRef Fn);
+void QLLVMSetMustTailCall(LLVMValueRef Call, LLVMBool isMustTailCall);
 
 #endif
 #endif

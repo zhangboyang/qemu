@@ -14,8 +14,11 @@
  */
 
 #include <llvm-c/Core.h>
-#include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
 using namespace llvm;
-extern "C" void QLLVMDeleteFunctionBody(LLVMValueRef Fn) {
-    unwrap<Function>(Fn)->deleteBody();
+
+extern "C"
+void QLLVMSetMustTailCall(LLVMValueRef Call, LLVMBool isMustTailCall) {
+    unwrap<CallInst>(Call)->setTailCallKind(
+        isMustTailCall ? CallInst::TCK_MustTail : CallInst::TCK_None);
 }
