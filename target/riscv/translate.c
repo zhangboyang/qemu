@@ -193,7 +193,7 @@ static void gen_goto_tb(DisasContext *ctx, int n, target_ulong dest)
 {
     if (use_goto_tb(ctx, dest)) {
         /* chaining is only allowed when the jump is to the same page */
-        tcg_gen_goto_tb(n);
+        tcg_gen_goto_tb(n, dest);
         tcg_gen_movi_tl(cpu_pc, dest);
 
         /* No need to check for single stepping here as use_goto_tb() will

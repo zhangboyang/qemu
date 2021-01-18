@@ -440,7 +440,7 @@ static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
     stub = LLVMGetNamedGlobal(l->mod, symname);
     if (!stub) {
         stub = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
-        if (g_hash_table_contains(l->tb_compiled, (void *)pc)) {
+        if (g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
             make_tb_symbol(symname, "tb", pc);
             fn = LLVMAddFunction(l->mod, symname, l->tb_type);
             set_tb_func_attr(l, fn);
@@ -450,8 +450,9 @@ static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
         } else {
             LLVMSetInitializer(stub, LLVMConstPointerNull(PTRTY(l->tb_type)));
             LLVMSetLinkage(stub, LLVMWeakAnyLinkage);
-            g_hash_table_replace(l->tb_stubs, (void *)pc, GINT_TO_POINTER(
-                GPOINTER_TO_INT(g_hash_table_lookup(l->tb_stubs, (void *)pc)) + 1));
+            g_hash_table_replace(l->tb_stubs, (void *)(uintptr_t)pc,
+                GINT_TO_POINTER(GPOINTER_TO_INT(
+                g_hash_table_lookup(l->tb_stubs, (void *)(uintptr_t)pc)) + 1));
         }
     }
     return stub;
@@ -468,8 +469,9 @@ static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
     LLVMSetInitializer(stub, fn);
     LLVMSetGlobalConstant(stub, 1);
     LLVMSetLinkage(stub, LLVMInternalLinkage);
-    g_hash_table_replace(l->tb_stubs, (void *)pc, GINT_TO_POINTER(
-        GPOINTER_TO_INT(g_hash_table_lookup(l->tb_stubs, (void *)pc)) - 1));
+    g_hash_table_replace(l->tb_stubs, (void *)(uintptr_t)pc,
+        GINT_TO_POINTER(GPOINTER_TO_INT(
+        g_hash_table_lookup(l->tb_stubs, (void *)(uintptr_t)pc)) - 1));
     return fn;
 }
 static LLVMValueRef get_epilogue(TCGLLVMContext *l)
@@ -1088,15 +1090,6 @@ static void batch_compile(TCGLLVMContext *l)
     //dump_module(l->mod);
     LLVMRunPassManager(l->mpm, l->mod);
     dump_module(l->mod);
-    
-/*    char filename[1000];
-    sprintf(filename, "dump%016llx.ll", (unsigned long long) tb->pc);
-    FILE *fp = fopen(filename, "w");
-    char *str = LLVMPrintModuleToString(l->mod);
-    fputs(str, fp);
-    LLVMDisposeMessage(str);
-    fclose(fp);*/
-
     qemu_log("LLVMRunPassManager end!\n");
 
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
@@ -1109,13 +1102,13 @@ static void batch_compile(TCGLLVMContext *l)
         make_tb_symbol(symname, "tb", tb->pc);
         check_error(LLVMOrcLLJITLookup(l->jit, &func_addr, symname));
         tb->llvm_tc = (void *)func_addr;
-        g_hash_table_add(l->tb_compiled, (void *)tb->pc);
+        g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)tb->pc);
 
-        if (g_hash_table_lookup(l->tb_stubs, (void *)tb->pc)) {
+        if (g_hash_table_lookup(l->tb_stubs, (void *)(uintptr_t)tb->pc)) {
             make_tb_symbol(symname, "stub", tb->pc);
             check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
             *(void **)stub_addr = (void *)func_addr;
-            g_hash_table_remove(l->tb_stubs, (void *)tb->pc);
+            g_hash_table_remove(l->tb_stubs, (void *)(uintptr_t)tb->pc);
         }
 
         make_tb_symbol(symname, "tb", tb->pc);
@@ -1145,7 +1138,7 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
             g_ptr_array_add(l->hot_tb, tb);
         }
         if (tb->exec_count < l->hot_limit2) {
-            if (0x4f9f3c==tb->pc||tb->pc == 0x56622b) tb->exec_count++;
+            tb->exec_count++;
             return false;
         }
         batch_compile(l);
@@ -1288,7 +1281,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->pmb = LLVMPassManagerBuilderCreate();
     l->mpm = LLVMCreatePassManager();
     LLVMPassManagerBuilderSetOptLevel(l->pmb, 2);
-    //LLVMPassManagerBuilderUseInlinerWithThreshold(l->pmb, 100000);
+    LLVMPassManagerBuilderUseInlinerWithThreshold(l->pmb, 100000);
     LLVMPassManagerBuilderPopulateModulePassManager(l->pmb, l->mpm);
 
 #define ATTR_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
@@ -1322,19 +1315,19 @@ void tcg_llvm_context_init(TCGContext *s)
     l->tb_stubs = g_hash_table_new(NULL, NULL);
 
     l->hot_tb = g_ptr_array_new();
-    l->hot_limit1 = 6000;
-    l->hot_limit2 = 6000;
+    l->hot_limit1 = 1000;
+    l->hot_limit2 = 10000;
 
     l->env_ty = LLVMArrayType(INTTY(8), sizeof(CPUArchState));
 
-    l->tb_callconv = 0; /* GHC-CC */
-    l->nb_fastreg = 1;
+    l->tb_callconv = 10; /* GHC-CC */
+    l->nb_fastreg = 8;
 
     l->regmap = g_malloc(sizeof(CPUArchState));
     memset(l->regmap, -1, sizeof(CPUArchState));
     l->fastreg = g_malloc_n(l->nb_fastreg, sizeof(LLVMValueRef));
     for (i = 0; i < l->nb_fastreg; i++) {
-        l->regmap[(i+19) * (GBITS / 8)] = i;
+        l->regmap[i * (GBITS / 8)] = i;
     }
     tb_args = alloca((l->nb_fastreg + 1) * sizeof(LLVMTypeRef));
     for (i = 0; i < l->nb_fastreg; i++) {
