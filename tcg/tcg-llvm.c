@@ -266,14 +266,14 @@ void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb)
 #define P2I(p) LLVMBuildPtrToInt(BLDR, p, INTTY(HBITS), "")
 #define I2P(i, bits) LLVMBuildIntToPtr(BLDR, i, PTRTY(INTTY(bits)), "")
 
-/* Convert i8* + offset to pointer, using GEP and bitcast */
-#define PI2P(ptr, off, bits, name) ({ \
-        LLVMValueRef off_value = (off); \
+/* Get &env[offset], using GEP and bitcast */
+#define E2P(env, off, bits, name) ({ \
+        LLVMValueRef __off_value[] = {CONSTH(0), off}; \
         LLVMBuildBitCast(BLDR, \
             LLVMBuildInBoundsGEP2(BLDR, \
-                INTTY(8), \
-                ptr, \
-                &off_value, 1, \
+                l->env_ty, \
+                env, \
+                __off_value, ARRAY_SIZE(__off_value), \
                 "" \
             ), \
             PTRTY(INTTY(bits)), \
@@ -472,7 +472,7 @@ static void init_fastreg(TCGLLVMContext *l, bool use_arg)
         int fr = l->regmap[i];
         if (fr < 0) continue;
         fastreg = &l->fastreg[fr];
-        envreg = PI2P(l->env, CONSTH(i), GBITS, "");
+        envreg = E2P(l->env, CONSTH(i), GBITS, "");
         *fastreg = ALLOCA(GBITS, "");
         if (use_arg) {
             ST(LLVMGetParam(l->fn, fr), *fastreg);
@@ -489,7 +489,7 @@ static void sync_fastreg(TCGLLVMContext *l, bool to_env)
         int fr = l->regmap[i];
         if (fr < 0) continue;
         fastreg = &l->fastreg[fr];
-        envreg = PI2P(l->env, CONSTH(i), GBITS, "");
+        envreg = E2P(l->env, CONSTH(i), GBITS, "");
         if (to_env) {
             ST(LD(*fastreg), envreg);
             ST(LLVMGetUndef(ELETY(TYOF(*fastreg))), *fastreg);
@@ -548,9 +548,9 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
                     off = CONSTH(t->mem_offset);
                     switch (t->type) {
                     case TCG_TYPE_I32:
-                        t->solt = PI2P(l->env, off, 32, t->name); break;
+                        t->solt = E2P(l->env, off, 32, t->name); break;
                     case TCG_TYPE_I64:
-                        t->solt = PI2P(l->env, off, 64, t->name); break;
+                        t->solt = E2P(l->env, off, 64, t->name); break;
                     default: tcg_abort();
                     }
                 } else {
@@ -640,7 +640,7 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
 #define OP_LD(src_bits, dst_bits, ext_kind) \
 do { \
     tcg_debug_assert(is_env(ARG1)); \
-    ST0(EXTEND(LD(PI2P(l->env, ARG2C, src_bits, "")), dst_bits, ext_kind)); \
+    ST0(EXTEND(LD(E2P(l->env, ARG2C, src_bits, "")), dst_bits, ext_kind)); \
 } while (0)
         case INDEX_op_ld8u_i32:   OP_LD( 8, 32, Z); break;
         case INDEX_op_ld8s_i32:   OP_LD( 8, 32, S); break;
@@ -660,7 +660,7 @@ do { \
 #define OP_ST(bits) \
 do { \
     tcg_debug_assert(is_env(ARG1)); \
-    ST(TRUNC(ARG0R, bits), PI2P(l->env, ARG2C, bits, "")); \
+    ST(TRUNC(ARG0R, bits), E2P(l->env, ARG2C, bits, "")); \
 } while (0)
         case INDEX_op_st8_i32:   OP_ST( 8); break;
         case INDEX_op_st16_i32:  OP_ST(16); break;
@@ -1175,7 +1175,7 @@ void tcg_llvm_register_helper_done(TCGContext *s)
 static void init_prologue(TCGLLVMContext *l)
 {
     int i;
-    LLVMTypeRef prologue_argty[2] = {PTRTY(INTTY(8)), PTRTY(INTTY(8))};
+    LLVMTypeRef prologue_argty[2] = {PTRTY(INTTY(8)), PTRTY(l->env_ty)};
     LLVMValueRef prologue_argvl[l->nb_fastreg + 1];
     LLVMValueRef prologue_call;
     LLVMTypeRef epilogue_argty[l->nb_fastreg + 2];
@@ -1206,7 +1206,7 @@ static void init_prologue(TCGLLVMContext *l)
     for (i = 0; i < l->nb_fastreg; i++) {
         epilogue_argty[i] = INTTY(GBITS);
     }
-    epilogue_argty[l->nb_fastreg] = PTRTY(INTTY(8)); /* env */
+    epilogue_argty[l->nb_fastreg] = PTRTY(l->env_ty); /* env */
     epilogue_argty[l->nb_fastreg + 1] = INTTY(HBITS); /* ret code */
     l->epilogue_ty = LLVMFunctionType(
         INTTY(HBITS), epilogue_argty, l->nb_fastreg + 2, 0);
@@ -1220,7 +1220,7 @@ static void init_prologue(TCGLLVMContext *l)
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
     LLVMRunPassManager(l->mpm, l->mod);
-    //dump_module(l->mod);
+    dump_module(l->mod);
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
@@ -1309,6 +1309,8 @@ void tcg_llvm_context_init(TCGContext *s)
     l->hot_limit1 = 1000;
     l->hot_limit2 = 10000;
 
+    l->env_ty = LLVMArrayType(INTTY(8), sizeof(CPUArchState));
+
     l->tb_callconv = 10; /* GHC-CC */
     l->nb_fastreg = 8;
 
@@ -1322,7 +1324,7 @@ void tcg_llvm_context_init(TCGContext *s)
     for (i = 0; i < l->nb_fastreg; i++) {
         tb_args[i] = INTTY(GBITS);
     }
-    tb_args[l->nb_fastreg] = PTRTY(INTTY(8));
+    tb_args[l->nb_fastreg] = PTRTY(l->env_ty);
     l->tb_type = LLVMFunctionType(INTTY(HBITS), tb_args, l->nb_fastreg + 1, 0);
 
     l->helpers = g_array_new(FALSE, TRUE, sizeof(LLVMJITCSymbolMapPair));

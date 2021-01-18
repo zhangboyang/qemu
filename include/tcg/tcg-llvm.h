@@ -54,6 +54,7 @@ typedef struct TCGLLVMContext {
     /* Translate block */
     LLVMTypeRef tb_type;
     unsigned tb_callconv;
+    LLVMTypeRef env_ty;
 
     GHashTable *tb_compiled;
     GHashTable *tb_stubs;
