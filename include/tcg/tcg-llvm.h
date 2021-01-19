@@ -60,6 +60,12 @@ typedef struct TCGLLVMContext {
 
     GHashTable *tb_compiled;
     GHashTable *tb_stubs;
+    GArray *tb_curstubs;
+
+    GPtrArray *stub_pool;
+    GHashTable *stub_map;
+    uint64_t stub_created;
+    void *last_exec_stub;
 
     /* Fast registers */
     int nb_fastreg;
@@ -83,6 +89,7 @@ typedef struct TCGLLVMContext {
     /* Hot code finder */
     GPtrArray *hot_tb;
     uint64_t hot_limit1, hot_limit2;
+
 } TCGLLVMContext;
 
 void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb);

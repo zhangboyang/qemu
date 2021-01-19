@@ -453,48 +453,40 @@ static void make_tb_symbol(char *symname, const char *t, target_ulong pc)
 {
     snprintf(symname, MAX_SYMNAME, "%s_%016" PRIx64, t, (uint64_t) pc);
 }
+static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
+{
+    LLVMValueRef fn;
+    char symname[MAX_SYMNAME];
+    make_tb_symbol(symname, "tb", pc);
+    fn = LLVMGetNamedFunction(l->mod, symname);
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, symname, l->tb_type);
+        set_tb_func_attr(l, fn);
+    }
+    return fn;
+}
 static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
 {
-    LLVMValueRef fn, stub;
+    LLVMValueRef stub;
     char symname[MAX_SYMNAME];
     make_tb_symbol(symname, "stub", pc);
     stub = LLVMGetNamedGlobal(l->mod, symname);
     if (!stub) {
         stub = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
         if (g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
-            make_tb_symbol(symname, "tb", pc);
-            fn = LLVMAddFunction(l->mod, symname, l->tb_type);
-            set_tb_func_attr(l, fn);
-            LLVMSetInitializer(stub, fn);
+            LLVMSetInitializer(stub, get_tb_func(l, pc));
             LLVMSetGlobalConstant(stub, 1);
             LLVMSetLinkage(stub, LLVMInternalLinkage);
         } else {
             LLVMSetInitializer(stub, LLVMConstPointerNull(PTRTY(l->tb_type)));
             LLVMSetLinkage(stub, LLVMWeakAnyLinkage);
-            g_hash_table_replace(l->tb_stubs, (void *)(uintptr_t)pc,
-                GINT_TO_POINTER(GPOINTER_TO_INT(
-                g_hash_table_lookup(l->tb_stubs, (void *)(uintptr_t)pc)) + 1));
         }
+        g_array_append_val(l->tb_curstubs, pc);
     }
     return stub;
 }
-static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
-{
-    LLVMValueRef fn, stub;
-    char symname[MAX_SYMNAME];
-    make_tb_symbol(symname, "tb", pc);
-    fn = LLVMAddFunction(l->mod, symname, l->tb_type);
-    set_tb_func_attr(l, fn);
-    make_tb_symbol(symname, "stub", pc);
-    stub = LLVMGetNamedGlobal(l->mod, symname);
-    LLVMSetInitializer(stub, fn);
-    LLVMSetGlobalConstant(stub, 1);
-    LLVMSetLinkage(stub, LLVMInternalLinkage);
-    g_hash_table_replace(l->tb_stubs, (void *)(uintptr_t)pc,
-        GINT_TO_POINTER(GPOINTER_TO_INT(
-        g_hash_table_lookup(l->tb_stubs, (void *)(uintptr_t)pc)) - 1));
-    return fn;
-}
+
+
 static LLVMValueRef get_epilogue(TCGLLVMContext *l)
 {
     LLVMValueRef fn;
@@ -545,7 +537,6 @@ static void sync_fastreg(TCGLLVMContext *l, bool use_dummy)
 static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
 {
     LLVMBasicBlockRef bb;
-    LLVMValueRef stub;
     const guint8 *buf, *buf_end;
     LLVMBasicBlockRef switch_bb_delay = NULL;
     LLVMValueRef next_tb;
@@ -553,11 +544,7 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
     memset(l->temps, 0, sizeof(l->temps));
     g_hash_table_remove_all(l->labels);
 
-    stub = get_tb_stub(l, tb->pc); // FIXME
     l->fn = get_tb_func(l, tb->pc);
-    LLVMSetInitializer(stub, l->fn);
-    //LLVMSetGlobalConstant(stub, 1);
-    //LLVMSetLinkage(stub, LLVMWeakAnyLinkage);
 
     l->env = PARAM(l->nb_fastreg);
     bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
@@ -1034,6 +1021,7 @@ do { \
             next_tb = LD(get_tb_stub(l, next_pc));
             exist_flag = LLVMBuildICmp(l->bldr, LLVMIntNE,
                 next_tb, LLVMConstPointerNull(TYOF(next_tb)), "");
+            exist_flag = CONST(1, 1); // FIXME
             br_instr = CONDBR(exist_flag, bb_exist, bb_notexist);
             LLVMSetMetadata(br_instr, l->md_prof, l->prof_likely);
 
@@ -1058,7 +1046,7 @@ do { \
             result = LLVMBuildCall2(l->bldr,
                 l->tb_type, next_tb, args, l->nb_fastreg + 1, "");
             set_tb_call_attr(l, result);
-            LLVMBuildRet(l->bldr, result);
+            LLVMBuildRetVoid(l->bldr);
             break;
         }
 
@@ -1073,12 +1061,72 @@ do { \
 
     //dump_module(l->mod);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+}
 
+static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
+{
+    void *fn;
+    if (!l->stub_pool->len) {
+        int id;
+        int pool_batch = 1;
+        char symname[MAX_SYMNAME];
+        LLVMValueRef args[l->nb_fastreg + 1], call_instr;
+        LLVMOrcThreadSafeModuleRef tsm;
+        LLVMOrcJITTargetAddress addr;
+
+        l->mod = LLVMModuleCreateWithNameInContext("epilogue_stub", l->ctx);
+        for (id = 0; id < pool_batch; id++) {
+            int i;
+            sprintf(symname, "epilogue_stub_%" PRIu64, l->stub_created + id);
+            l->fn = LLVMAddFunction(l->mod, symname, l->tb_type);
+            set_tb_func_attr(l, l->fn);
+            LLVMPositionBuilderAtEnd(l->bldr, 
+            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+            for (i = 0; i < l->nb_fastreg + 1; i++) {
+                args[i] = PARAM(i);
+            }
+            ST(
+                LLVMBuildBitCast(l->bldr, l->fn, PTRTY(INTTY(8)), ""),
+                LLVMBuildIntToPtr(l->bldr,
+                    CONSTH((uintptr_t)&l->last_exec_stub),
+                    PTRTY(PTRTY(INTTY(8))), "last_exec_stub"
+                )
+            );
+            call_instr = LLVMBuildCall2(l->bldr,
+                l->tb_type, get_epilogue(l), args, l->nb_fastreg + 1, "");
+            set_tb_call_attr(l, call_instr);
+            QLLVMSetMustTailCall(call_instr, 0);
+            LLVMBuildRetVoid(l->bldr);
+            LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+        }
+        LLVMRunPassManager(l->mpm_O2, l->mod);
+        dump_module(l->mod);
+        tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
+        check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
+        for (id = 0; id < pool_batch; id++) {
+            sprintf(symname, "epilogue_stub_%" PRIu64, l->stub_created + id);
+            check_error(LLVMOrcLLJITLookup(l->jit, &addr, symname));
+            g_ptr_array_add(l->stub_pool, (void *)addr);
+        }
+
+        l->stub_created += pool_batch;
+    }
+    fn = g_ptr_array_remove_index_fast(l->stub_pool, 0);
+    g_hash_table_replace(l->stub_map, fn, (void *)(uintptr_t)pc);
+    log_disas(fn, 50);
+    return fn;
+}
+static void free_epilogue_stub(TCGLLVMContext *l, void *fn)
+{
+    g_ptr_array_add(l->stub_pool, fn);
+}
+static target_ulong map_epilogue_stub(TCGLLVMContext *l, void *fn)
+{
+    return (target_ulong) (uintptr_t) g_hash_table_lookup(l->stub_map, fn);
 }
 
 static void batch_compile(TCGLLVMContext *l)
 {
-    TranslationBlock *tb;
     LLVMOrcThreadSafeModuleRef tsm;
     LLVMOrcJITTargetAddress func_addr, stub_addr;
     char symname[MAX_SYMNAME];
@@ -1087,10 +1135,21 @@ static void batch_compile(TCGLLVMContext *l)
     qemu_log("batch compile!\n");
     l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
 
+    g_array_set_size(l->tb_curstubs, 0);
     for (i = 0; i < l->hot_tb->len; i++) {
-        tb = g_ptr_array_index(l->hot_tb, i);
-        gen_code(l, tb);
+        TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
+        g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)tb->pc);
     }
+    for (i = 0; i < l->hot_tb->len; i++) {
+        LLVMValueRef stub;
+        TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
+        gen_code(l, tb);
+        stub = get_tb_stub(l, tb->pc);
+        LLVMSetInitializer(stub, l->fn);
+        LLVMSetGlobalConstant(stub, 1);
+        LLVMSetLinkage(stub, LLVMInternalLinkage);
+    }
+
 
     qemu_log("LLVMRunPassManager bgein!\n");
     //dump_module(l->mod);
@@ -1107,22 +1166,20 @@ static void batch_compile(TCGLLVMContext *l)
     LLVMDisposeMessage(str);
     fclose(fp);
     
-
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
-
     for (i = 0; i < l->hot_tb->len; i++) {
-        tb = g_ptr_array_index(l->hot_tb, i);
+        TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
 
         make_tb_symbol(symname, "tb", tb->pc);
         check_error(LLVMOrcLLJITLookup(l->jit, &func_addr, symname));
         tb->llvm_tc = (void *)func_addr;
-        g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)tb->pc);
 
-        if (g_hash_table_lookup(l->tb_stubs, (void *)(uintptr_t)tb->pc)) {
+        if (g_hash_table_contains(l->tb_stubs, (void *)(uintptr_t)tb->pc)) {
             make_tb_symbol(symname, "stub", tb->pc);
             check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
+            free_epilogue_stub(l, *(void **)stub_addr);
             *(void **)stub_addr = (void *)func_addr;
             g_hash_table_remove(l->tb_stubs, (void *)(uintptr_t)tb->pc);
         }
@@ -1139,6 +1196,20 @@ static void batch_compile(TCGLLVMContext *l)
             qemu_log("%02x ", ptr[p]);
         }
         qemu_log("\n");*/
+    }
+
+    for (i = 0; i < l->tb_curstubs->len; i++) {
+        target_ulong pc = g_array_index(l->tb_curstubs, target_ulong, i);
+        if (g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
+            continue;
+        }
+        if (g_hash_table_contains(l->tb_stubs, (void *)(uintptr_t)pc)) {
+            continue;
+        }
+        make_tb_symbol(symname, "stub", pc);
+        check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
+        *(void **)stub_addr = alloc_epilogue_stub(l, pc);
+        g_hash_table_add(l->tb_stubs, (void *)(uintptr_t)pc);
     }
 
     qemu_log("compile done! (%u compiled)\n", l->hot_tb->len);
@@ -1160,7 +1231,14 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
         batch_compile(l);
     }
     //qemu_log("llvm exec! begin\n");
+    l->last_exec_stub = NULL;
     l->prologue(tb->llvm_tc, env);
+    if (l->last_exec_stub) {
+        target_ulong pc = map_epilogue_stub(l, l->last_exec_stub);
+        CPUState *cpu = env_cpu(env);
+        CPUClass *cc = CPU_GET_CLASS(cpu);
+        cc->set_pc(cpu, pc);
+    }
     *ret = 0;
     //qemu_log("pc=%p cc_src=%p\n", (void *)tb->pc, (void *)env->cc_src);
     //qemu_log("llvm exec! done; ret=%p\n", (void *)*ret);
@@ -1221,7 +1299,7 @@ static void init_prologue(TCGLLVMContext *l)
     l->mod = LLVMModuleCreateWithNameInContext("prologue", l->ctx);
 
     l->fn = LLVMAddFunction(l->mod, "prologue", 
-        LLVMFunctionType(INTTY(HBITS), prologue_argty, 2, 0));
+        LLVMFunctionType(VOIDTY, prologue_argty, 2, 0));
     LLVMPositionBuilderAtEnd(l->bldr, 
         LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
     l->env = PARAM(1);
@@ -1235,7 +1313,7 @@ static void init_prologue(TCGLLVMContext *l)
         prologue_argvl, l->nb_fastreg + 1, "");
     set_tb_call_attr(l, prologue_call);
     QLLVMSetMustTailCall(prologue_call, 0);
-    LLVMBuildRet(l->bldr, prologue_call);
+    LLVMBuildRetVoid(l->bldr);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
     l->fn = get_epilogue(l);
@@ -1243,11 +1321,11 @@ static void init_prologue(TCGLLVMContext *l)
         LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
     l->env = PARAM(l->nb_fastreg);
     sync_fastreg(l, false);
-    LLVMBuildRet(l->bldr, CONSTH(0));
+    LLVMBuildRetVoid(l->bldr);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
     LLVMRunPassManager(l->mpm_O2, l->mod);
-    //dump_module(l->mod);
+    dump_module(l->mod);
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
@@ -1345,6 +1423,10 @@ void tcg_llvm_context_init(TCGContext *s)
 
     l->tb_compiled = g_hash_table_new(NULL, NULL);
     l->tb_stubs = g_hash_table_new(NULL, NULL);
+    l->tb_curstubs = g_array_new(FALSE, FALSE, sizeof(target_ulong));
+
+    l->stub_pool = g_ptr_array_new();
+    l->stub_map = g_hash_table_new(NULL, NULL);
 
     l->hot_tb = g_ptr_array_new();
     l->hot_limit1 = 1000;
@@ -1369,7 +1451,7 @@ void tcg_llvm_context_init(TCGContext *s)
         tb_args[i] = l->regmap[i].ty;
     }
     tb_args[l->nb_fastreg] = PTRTY(l->env_ty);
-    l->tb_type = LLVMFunctionType(INTTY(HBITS), tb_args, l->nb_fastreg + 1, 0);
+    l->tb_type = LLVMFunctionType(VOIDTY, tb_args, l->nb_fastreg + 1, 0);
 
     l->helper_ty = LLVMFunctionType(INTTY(HBITS), NULL, 0, 1);
     init_prologue(l);
