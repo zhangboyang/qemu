@@ -345,12 +345,15 @@ static void set_tb_func_attr(TCGLLVMContext *l, LLVMValueRef fn)
     LLVMSetFunctionCallConv(fn, l->tb_callconv);
     LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_noalias);
     LLVMAddAttributeAtIndex(fn, l->nb_fastreg + 1, l->attr_vaildenv);
+    LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, l->attr_nounwind);
 }
 static void set_tb_call_attr(TCGLLVMContext *l, LLVMValueRef instr)
 {
     LLVMSetInstructionCallConv(instr, l->tb_callconv);
     LLVMAddCallSiteAttribute(instr, l->nb_fastreg + 1, l->attr_noalias);
     LLVMAddCallSiteAttribute(instr, l->nb_fastreg + 1, l->attr_vaildenv);
+    LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
+        l->attr_nounwind);
     QLLVMSetMustTailCall(instr, 1);
 }
 
@@ -433,6 +436,8 @@ static LLVMValueRef get_helper(TCGLLVMContext *l, int idx)
 static void set_helper_call_attr(TCGLLVMContext *l, LLVMValueRef instr, int idx)
 {
     const TCGHelperInfo *info = &all_helpers[idx];
+    LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
+        l->attr_nounwind);
     if ((info->flags & TCG_CALL_NO_READ_GLOBALS)) {
         LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
             l->attr_readnone);
@@ -501,40 +506,31 @@ static LLVMValueRef get_epilogue(TCGLLVMContext *l)
     return fn;
 }
 
-static void init_fastreg(TCGLLVMContext *l, bool use_arg)
+
+static LLVMValueRef get_dummy(TCGLLVMContext *l)
 {
-    unsigned i;
-    LLVMValueRef envreg, *fastreg;
-    for (i = 0; i < sizeof(CPUArchState); i += GBITS / 8) {
-        int fr = l->regmap[i];
-        if (fr < 0) continue;
-        fastreg = &l->fastreg[fr];
-        envreg = ENV(i, INTTY(GBITS), "");
-        *fastreg = ALLOCA(GBITS, "");
-        if (use_arg) {
-            ST(PARAM(fr), *fastreg);
-        } else {
-            ST(LD(envreg), *fastreg);
-        }
+    LLVMValueRef dummy;
+    dummy = LLVMGetNamedGlobal(l->mod, "dummy");
+    if (!dummy) {
+        dummy = LLVMAddGlobal(l->mod, INTTY(GBITS), "dummy");
+        LLVMSetGlobalConstant(dummy, 1);
+        LLVMSetLinkage(dummy, LLVMInternalLinkage);
+    }
+    return dummy;
+}
+static void sync_fastreg(TCGLLVMContext *l, bool use_dummy)
+{
+    int i;
+    for (i = 0; i < l->nb_fastreg; i++) {
+        ST(
+            use_dummy ? LD(get_dummy(l)) : PARAM(i),
+            ENV(l->regmap[i], INTTY(GBITS), "")
+        );
     }
 }
-static void sync_fastreg(TCGLLVMContext *l, bool to_env)
+static void replace_dummy(TCGLLVMContext *l)
 {
-    unsigned i;
-    LLVMValueRef envreg, *fastreg;
-    for (i = 0; i < sizeof(CPUArchState); i += GBITS / 8) {
-        int fr = l->regmap[i];
-        if (fr < 0) continue;
-        fastreg = &l->fastreg[fr];
-        envreg = ENV(i, INTTY(GBITS), "");
-        if (to_env) {
-            ST(LD(*fastreg), envreg);
-            //ST(LLVMGetUndef(ELETY(TYOF(*fastreg))), *fastreg);
-        } else {
-            ST(LD(envreg), *fastreg);
-            //ST(LLVMGetUndef(ELETY(TYOF(envreg))), envreg);
-        }
-    }
+    LLVMSetInitializer(get_dummy(l), LLVMGetUndef(INTTY(GBITS)));
 }
 
 static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
@@ -555,8 +551,6 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
     l->env = PARAM(l->nb_fastreg);
     bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
     LLVMPositionBuilderAtEnd(l->bldr, bb);
-
-    init_fastreg(l, true);
 
 #define is_env(idx) (strcmp(l->temps[idx].name, "env") == 0)
     buf = tb->packed_tcg.temp_buf->data;
@@ -582,11 +576,7 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
                 if (!is_env(t->mem_base)) {
                     tcg_abort();
                 }
-                if (l->regmap[t->mem_offset] < 0) {
-                    t->solt = ENV(t->mem_offset, ty, t->name);
-                } else {
-                    t->solt = l->fastreg[l->regmap[t->mem_offset]];
-                }
+                t->solt = ENV(t->mem_offset, ty, t->name);
             }
             break;
         case TEMP_LOCAL:
@@ -599,6 +589,8 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
             break;
         }
     }
+
+    sync_fastreg(l, false);
 
     buf = tb->packed_tcg.op_buf->data;
     buf_end = buf + tb->packed_tcg.op_buf->len;
@@ -657,14 +649,8 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
         
 #define OP_LD(src_bits, dst_bits, ext_kind) \
 do { \
-    LLVMValueRef ptr; \
     if (!is_env(ARG1)) tcg_abort(); \
-    if ((uint64_t)ARG2 < sizeof(CPUArchState) && l->regmap[ARG2] >= 0) { \
-        ptr = l->fastreg[l->regmap[ARG2]]; \
-    } else { \
-        ptr = ENV(ARG2, INTTY(src_bits), ""); \
-    } \
-    ST0(EXTEND(LD(ptr), dst_bits, ext_kind)); \
+    ST0(EXTEND(LD(ENV(ARG2, INTTY(src_bits), "")), dst_bits, ext_kind)); \
 } while (0)
         case INDEX_op_ld8u_i32:   OP_LD( 8, 32, Z); break;
         case INDEX_op_ld8s_i32:   OP_LD( 8, 32, S); break;
@@ -683,14 +669,8 @@ do { \
 
 #define OP_ST(bits) \
 do { \
-    LLVMValueRef ptr; \
     if (!is_env(ARG1)) tcg_abort(); \
-    if ((uint64_t)ARG2 < sizeof(CPUArchState) && l->regmap[ARG2] >= 0) { \
-        ptr = l->fastreg[l->regmap[ARG2]]; \
-    } else { \
-        ptr = ENV(ARG2, INTTY(bits), ""); \
-    } \
-    ST(TRUNC(ARG0R, bits), ptr); \
+    ST(TRUNC(ARG0R, bits), ENV(ARG2, INTTY(bits), "")); \
 } while (0)
         case INDEX_op_st8_i32:   OP_ST( 8); break;
         case INDEX_op_st16_i32:  OP_ST(16); break;
@@ -1018,10 +998,8 @@ do { \
             fn = LLVMBuildBitCast(l->bldr,
                 get_helper(l, helper_idx), PTRTY(fn_ty), "");
 
-            sync_fastreg(l, true);
             result = LLVMBuildCall2(l->bldr, fn_ty, fn, args, nb_iargs, "");
             set_helper_call_attr(l, result, helper_idx);
-            sync_fastreg(l, false);
             if (nb_oargs) {
                 ST0(result);
             }
@@ -1049,8 +1027,9 @@ do { \
 
             switch_bb(l, bb_exist);
             for (i = 0; i < l->nb_fastreg; i++) {
-                args[i] = LD(l->fastreg[i]);
+                args[i] = LD(ENV(l->regmap[i], INTTY(GBITS), ""));
             }
+            sync_fastreg(l, true);
             args[l->nb_fastreg] = l->env;
             result = LLVMBuildCall2(l->bldr,
                 l->tb_type, next_tb, args, l->nb_fastreg + 1, "");
@@ -1066,8 +1045,9 @@ do { \
             LLVMValueRef args[l->nb_fastreg + 1];
             LLVMValueRef result;
             for (i = 0; i < l->nb_fastreg; i++) {
-                args[i] = LD(l->fastreg[i]);
+                args[i] =  LD(ENV(l->regmap[i], INTTY(GBITS), ""));
             }
+            sync_fastreg(l, true);
             args[l->nb_fastreg] = l->env;
             //args[l->nb_fastreg + 1] = c == INDEX_op_exit_tb ? ARG0C : CONSTH(0);
             result = LLVMBuildCall2(l->bldr,
@@ -1108,8 +1088,18 @@ static void batch_compile(TCGLLVMContext *l)
     qemu_log("LLVMRunPassManager bgein!\n");
     //dump_module(l->mod);
     LLVMRunPassManager(l->mpm, l->mod);
+    replace_dummy(l);
+    LLVMRunPassManager(l->mpm, l->mod);
     dump_module(l->mod);
     qemu_log("LLVMRunPassManager end!\n");
+    static int dumpid = 0;
+    char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
+    FILE *fp = fopen(dumpf, "w");
+    char *str = LLVMPrintModuleToString(l->mod);
+    fputs(str, fp);
+    LLVMDisposeMessage(str);
+    fclose(fp);
+    
 
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
@@ -1228,9 +1218,8 @@ static void init_prologue(TCGLLVMContext *l)
     LLVMPositionBuilderAtEnd(l->bldr, 
         LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
     l->env = PARAM(1);
-    init_fastreg(l, false);
     for (i = 0; i < l->nb_fastreg; i++) {
-        prologue_argvl[i] = LD(l->fastreg[i]);
+        prologue_argvl[i] = LD(ENV(l->regmap[i], INTTY(GBITS), ""));
     }
     prologue_argvl[l->nb_fastreg] = l->env;
     prologue_call = LLVMBuildCall2(l->bldr,
@@ -1246,8 +1235,7 @@ static void init_prologue(TCGLLVMContext *l)
     LLVMPositionBuilderAtEnd(l->bldr,
         LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
     l->env = PARAM(l->nb_fastreg);
-    init_fastreg(l, true);
-    sync_fastreg(l, true);
+    sync_fastreg(l, false);
     LLVMBuildRetVoid(l->bldr);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
@@ -1312,6 +1300,8 @@ void tcg_llvm_context_init(TCGContext *s)
         ATTR_KINDID("noalias"), 0);
     l->attr_vaildenv = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("dereferenceable"), sizeof(CPUArchState));
+    l->attr_nounwind = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("nounwind"), 0);
     l->attr_readnone = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("readnone"), 0);
     l->attr_readonly = LLVMCreateEnumAttribute(l->ctx,
@@ -1350,11 +1340,9 @@ void tcg_llvm_context_init(TCGContext *s)
     l->tb_callconv = 10; /* GHC-CC */
     l->nb_fastreg = 8;
 
-    l->regmap = g_malloc(sizeof(CPUArchState));
-    memset(l->regmap, -1, sizeof(CPUArchState));
-    l->fastreg = g_malloc_n(l->nb_fastreg, sizeof(LLVMValueRef));
+    l->regmap = g_malloc_n(l->nb_fastreg, sizeof(*l->regmap));
     for (i = 0; i < l->nb_fastreg; i++) {
-        l->regmap[i * (GBITS / 8)] = i;
+        l->regmap[i] = i * (GBITS / 8);
     }
     tb_args = alloca((l->nb_fastreg + 1) * sizeof(LLVMTypeRef));
     for (i = 0; i < l->nb_fastreg; i++) {

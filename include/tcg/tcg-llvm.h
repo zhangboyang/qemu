@@ -44,6 +44,7 @@ typedef struct TCGLLVMContext {
     /* Convenient values */
     LLVMAttributeRef attr_noalias;
     LLVMAttributeRef attr_vaildenv;
+    LLVMAttributeRef attr_nounwind;
     LLVMAttributeRef attr_readnone;
     LLVMAttributeRef attr_readonly;
     unsigned md_aliasscope;
@@ -63,8 +64,7 @@ typedef struct TCGLLVMContext {
 
     /* Fast registers */
     int nb_fastreg;
-    LLVMValueRef *fastreg;
-    signed char *regmap;
+    uint32_t *regmap;
 
     /* Temporary values */
     TCGLLVMTemp temps[TCG_MAX_TEMPS];
