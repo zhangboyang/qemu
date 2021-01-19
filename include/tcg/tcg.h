@@ -386,6 +386,16 @@ typedef TCGv_ptr TCGv_env;
 #error Unhandled TARGET_LONG_BITS value
 #endif
 
+typedef struct TCGHelperInfo {
+    void *func;
+    const char *name;
+    unsigned flags;
+    unsigned sizemask;
+} TCGHelperInfo;
+
+extern const TCGHelperInfo all_helpers[];
+extern GHashTable *helper_table;
+
 /* call flags */
 /* Helper does not read globals (either directly or through an exception). It
    implies TCG_CALL_NO_WRITE_GLOBALS. */
@@ -722,8 +732,6 @@ static inline void *tcg_splitwx_to_rw(const void *rx)
     return rx ? (void *)rx - tcg_splitwx_diff : NULL;
 }
 #endif
-
-int helper_idx(uintptr_t val);
 
 static inline size_t temp_idx(TCGTemp *ts)
 {

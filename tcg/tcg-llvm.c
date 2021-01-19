@@ -124,7 +124,10 @@ static void serialize_op(GByteArray *op_buf, TCGOp *op, bool *temp_used)
             carg = arg_label(op->args[i])->id;
         }
         if (carg_is_helper(c, j)) {
-            carg = helper_idx(op->args[i]);
+            TCGHelperInfo *info;
+            info = g_hash_table_lookup(helper_table, (gpointer)op->args[i]);
+            tcg_debug_assert(info);
+            carg = info - all_helpers;
         }
         if (carg_is_exitcode(c, j)) {
             carg = carg & TB_EXIT_MASK;
@@ -409,24 +412,37 @@ static void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
 
 
 #define MAX_SYMNAME 128
-static void make_helper_symbol(char *symname, int idx)
+static void make_helper_symbol(char *symname, const TCGHelperInfo *info)
 {
-    snprintf(symname, MAX_SYMNAME, "helper_%d", idx);
+    snprintf(symname, MAX_SYMNAME,
+        "helper_%ld_%s", info - all_helpers, info->name);
 }
 
 static LLVMValueRef get_helper(TCGLLVMContext *l, int idx)
 {
-    LLVMValueRef g;
+    LLVMValueRef fn;
     char symname[MAX_SYMNAME];
-    make_helper_symbol(symname, idx);
-    g = LLVMGetNamedGlobal(l->mod, symname);
-    if (!g) {
-        g = LLVMAddGlobal(l->mod, INTTY(8), symname);
-        LLVMSetLinkage(g, LLVMExternalLinkage);
+    make_helper_symbol(symname, &all_helpers[idx]);
+    fn = LLVMGetNamedFunction(l->mod, symname);
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, symname, l->helper_ty);
+        LLVMSetLinkage(fn, LLVMExternalLinkage);
     }
-    return g;
+    return fn;
 }
-
+static void set_helper_call_attr(TCGLLVMContext *l, LLVMValueRef instr, int idx)
+{
+    const TCGHelperInfo *info = &all_helpers[idx];
+    if ((info->flags & TCG_CALL_NO_READ_GLOBALS)) {
+        LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
+            l->attr_readnone);
+    }
+    if ((info->flags & TCG_CALL_NO_WRITE_GLOBALS)) {
+        LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
+            l->attr_readonly);
+    }
+    /* TODO: more tcg call flags */
+}
 
 static void make_tb_symbol(char *symname, const char *t, target_ulong pc)
 {
@@ -983,6 +999,9 @@ do { \
             LLVMTypeRef fn_ty;
             LLVMValueRef args[MAX_OPC_PARAM_IARGS];
             LLVMValueRef fn, result;
+            int helper_idx;
+
+            helper_idx = op_args[nb_oargs + nb_iargs];
 
             if (nb_oargs > 1) {
                 tcg_abort(); /* TODO */
@@ -997,11 +1016,11 @@ do { \
             ret_ty = nb_oargs ? ELETY(TYOF(ARG0L)) : VOIDTY;
             fn_ty = LLVMFunctionType(ret_ty, args_ty, nb_iargs, 0);
             fn = LLVMBuildBitCast(l->bldr,
-                get_helper(l, op_args[nb_oargs + nb_iargs]),
-                PTRTY(fn_ty), "");
+                get_helper(l, helper_idx), PTRTY(fn_ty), "");
 
             sync_fastreg(l, true);
             result = LLVMBuildCall2(l->bldr, fn_ty, fn, args, nb_iargs, "");
+            set_helper_call_attr(l, result, helper_idx);
             sync_fastreg(l, false);
             if (nb_oargs) {
                 ST0(result);
@@ -1168,25 +1187,29 @@ void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb)
     g_free(tb->packed_tcg.digest);
 }
 
-void tcg_llvm_register_helper(TCGContext *s, int idx, void *func)
+static void init_helpers(TCGLLVMContext *l)
 {
-    TCGLLVMContext *l = s->llvm_ctx;
-    LLVMJITCSymbolMapPair *sympair;
+    int i;
+    LLVMJITCSymbolMapPair sym;
     char symname[MAX_SYMNAME];
-    make_helper_symbol(symname, idx);
-    if (idx >= l->helpers->len) {
-        g_array_set_size(l->helpers, idx + 1);
+    GArray *helpers;
+
+    helpers = g_array_new(FALSE, TRUE, sizeof(LLVMJITCSymbolMapPair));
+
+    for (i = 0; all_helpers[i].func; i++) {
+        make_helper_symbol(symname, &all_helpers[i]);
+
+        memset(&sym, 0, sizeof(sym));
+        sym.Name = LLVMOrcExecutionSessionIntern(l->es, symname);
+        sym.Sym.Address = (LLVMOrcJITTargetAddress) all_helpers[i].func;
+
+        g_array_append_val(helpers, sym);
     }
 
-    sympair = &g_array_index(l->helpers, LLVMJITCSymbolMapPair, idx);
-    sympair->Name = LLVMOrcExecutionSessionIntern(l->es, symname);
-    sympair->Sym.Address = (LLVMOrcJITTargetAddress) func;
-}
-void tcg_llvm_register_helper_done(TCGContext *s)
-{
-    TCGLLVMContext *l = s->llvm_ctx;
     check_error(LLVMOrcJITDylibDefine(l->jd,
-        LLVMOrcAbsoluteSymbols((void *) l->helpers->data, l->helpers->len)));
+        LLVMOrcAbsoluteSymbols((void *) helpers->data, helpers->len)));
+    
+    g_array_free(helpers, TRUE);
 }
 
 static void init_prologue(TCGLLVMContext *l)
@@ -1289,6 +1312,10 @@ void tcg_llvm_context_init(TCGContext *s)
         ATTR_KINDID("noalias"), 0);
     l->attr_vaildenv = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("dereferenceable"), sizeof(CPUArchState));
+    l->attr_readnone = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("readnone"), 0);
+    l->attr_readonly = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("readonly"), 0);
     
 #define MD_KINDID(s) LLVMGetMDKindIDInContext(l->ctx, s, strlen(s))
     l->md_aliasscope = MD_KINDID("alias.scope");
@@ -1336,9 +1363,9 @@ void tcg_llvm_context_init(TCGContext *s)
     tb_args[l->nb_fastreg] = PTRTY(l->env_ty);
     l->tb_type = LLVMFunctionType(VOIDTY, tb_args, l->nb_fastreg + 1, 0);
 
-    l->helpers = g_array_new(FALSE, TRUE, sizeof(LLVMJITCSymbolMapPair));
-
+    l->helper_ty = LLVMFunctionType(INTTY(HBITS), NULL, 0, 1);
     init_prologue(l);
+    init_helpers(l);
 }
 
 void tcg_llvm_init(void)

@@ -39,17 +39,19 @@ typedef struct TCGLLVMContext {
     LLVMOrcExecutionSessionRef es;
     LLVMPassManagerBuilderRef pmb;
     LLVMPassManagerRef mpm;
-    GArray *helpers;
     GChecksum *hasher;
 
     /* Convenient values */
     LLVMAttributeRef attr_noalias;
     LLVMAttributeRef attr_vaildenv;
+    LLVMAttributeRef attr_readnone;
+    LLVMAttributeRef attr_readonly;
     unsigned md_aliasscope;
     unsigned md_noalias;
     LLVMValueRef env_scope;
     unsigned md_prof;
     LLVMValueRef prof_likely;
+    LLVMTypeRef helper_ty;
 
     /* Translate block */
     LLVMTypeRef tb_type;
@@ -85,8 +87,6 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
     CPUArchState *env, uintptr_t *ret);
 void tcg_llvm_init_tb(TCGContext *s, TranslationBlock *tb);
 void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb);
-void tcg_llvm_register_helper(TCGContext *s, int idx, void *func);
-void tcg_llvm_register_helper_done(TCGContext *s);
 void tcg_llvm_context_init(TCGContext *s);
 void tcg_llvm_init(void);
 

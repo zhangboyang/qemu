@@ -960,19 +960,13 @@ void tcg_pool_reset(TCGContext *s)
     s->pool_current = NULL;
 }
 
-typedef struct TCGHelperInfo {
-    void *func;
-    const char *name;
-    unsigned flags;
-    unsigned sizemask;
-} TCGHelperInfo;
-
 #include "exec/helper-proto.h"
 
-static const TCGHelperInfo all_helpers[] = {
+const TCGHelperInfo all_helpers[] = {
 #include "exec/helper-tcg.h"
+    { NULL } /* end marker */
 };
-static GHashTable *helper_table;
+GHashTable *helper_table;
 
 static int indirect_reg_alloc_order[ARRAY_SIZE(tcg_target_reg_alloc_order)];
 static void process_op_defs(TCGContext *s);
@@ -1015,18 +1009,10 @@ void tcg_context_init(TCGContext *s)
     /* Use g_direct_hash/equal for direct pointer comparisons on func.  */
     helper_table = g_hash_table_new(NULL, NULL);
 
-    for (i = 0; i < ARRAY_SIZE(all_helpers); ++i) {
+    for (i = 0; all_helpers[i].func; ++i) {
         g_hash_table_insert(helper_table, (gpointer)all_helpers[i].func,
                             (gpointer)&all_helpers[i]);
     }
-
-#ifdef CONFIG_TCG_LLVM
-    for (i = 0; i < ARRAY_SIZE(all_helpers); ++i) {
-        tcg_llvm_register_helper(s, i, all_helpers[i].func);
-    }
-    tcg_llvm_register_helper_done(s);
-#endif
-    
 
     tcg_target_init(s);
     process_op_defs(s);
@@ -2108,14 +2094,6 @@ static inline const char *tcg_find_helper(TCGContext *s, uintptr_t val)
         }
     }
     return ret;
-}
-int helper_idx(uintptr_t val)
-{
-    TCGHelperInfo *info = g_hash_table_lookup(helper_table, (gpointer)val);
-    if (!info) {
-        tcg_abort();
-    }
-    return info - all_helpers;
 }
 
 
