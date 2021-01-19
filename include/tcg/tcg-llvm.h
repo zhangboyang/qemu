@@ -37,8 +37,7 @@ typedef struct TCGLLVMContext {
     LLVMBuilderRef bldr;
     LLVMOrcJITDylibRef jd;
     LLVMOrcExecutionSessionRef es;
-    LLVMPassManagerBuilderRef pmb;
-    LLVMPassManagerRef mpm;
+    LLVMPassManagerRef mpm_O2, mpm_inline;
     GChecksum *hasher;
 
     /* Convenient values */
@@ -64,7 +63,11 @@ typedef struct TCGLLVMContext {
 
     /* Fast registers */
     int nb_fastreg;
-    uint32_t *regmap;
+    struct {
+        uint32_t off;
+        LLVMTypeRef ty;
+    } *regmap;
+    GPtrArray *dummys;
 
     /* Temporary values */
     TCGLLVMTemp temps[TCG_MAX_TEMPS];
