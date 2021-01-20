@@ -1,7 +1,7 @@
 /*
  * QEMU TCG JIT using LLVM
  *
- * Copyright (C) 2020, Zhang Boyang <zhangboyang.id@gmail.com>
+ * Copyright (C) 2020, 2021, Zhang Boyang <zhangboyang.id@gmail.com>
  *
  * License: GNU GPL, version 2 or later.
  *   See the COPYING file in the top-level directory.
@@ -499,6 +499,20 @@ static LLVMValueRef get_epilogue(TCGLLVMContext *l)
     if (!fn) {
         fn = LLVMAddFunction(l->mod, "epilogue", l->tb_type);
         set_tb_func_attr(l, fn);
+    }
+    return fn;
+}
+
+static LLVMValueRef get_pc2func(TCGLLVMContext *l)
+{
+    LLVMValueRef fn;
+    fn = LLVMGetNamedFunction(l->mod, "pc2func");
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, "pc2func", l->pc2func_ty);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_nounwind);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_readonly);
     }
     return fn;
 }
@@ -1018,7 +1032,11 @@ do { \
             switch_bb_delay = NEWBB("dead");
             goto chain_next_tb;
         }
-        case INDEX_op_goto_ptr:
+        case INDEX_op_goto_ptr: {
+            next_tb = LLVMBuildCall2(l->bldr,
+                l->pc2func_ty, get_pc2func(l), &l->env, 1, "");
+            goto chain_next_tb;
+        }
         case INDEX_op_exit_tb: {
             next_tb = get_epilogue(l);
             goto chain_next_tb;
@@ -1056,21 +1074,42 @@ do { \
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 }
 
-static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
+#define PC2FUNC_HASHSEED 17777  /* use a prime */
+static __thread struct {
+    target_ulong pc;
+    void *func;
+} pc2func_hashtbl[PC2FUNC_HASHSEED];
+#define pc2func_item(pc) pc2func_hashtbl[(pc) % PC2FUNC_HASHSEED]
+
+static void *pc2func(CPUArchState *env)
+{
+    TCGLLVMContext *l = tcg_ctx->llvm_ctx;
+    target_ulong cs_base, pc;
+    uint32_t flags;
+    cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
+    if (likely(pc2func_item(pc).pc == pc)) {
+        return pc2func_item(pc).func;
+    } else {
+        return l->epilogue;
+    }
+}
+
+static void *alloc_unique_stub(TCGLLVMContext *l, target_ulong pc)
 {
     void *fn;
     if (!l->stub_pool->len) {
         int id;
         int pool_batch = 100;
         char symname[MAX_SYMNAME];
-        LLVMValueRef args[l->nb_fastreg + 1], call_instr;
+        LLVMValueRef args[l->nb_fastreg + 1], call_instr, last_stub;
         LLVMOrcThreadSafeModuleRef tsm;
         LLVMOrcJITTargetAddress addr;
 
-        l->mod = LLVMModuleCreateWithNameInContext("epilogue_stub", l->ctx);
+        l->mod = LLVMModuleCreateWithNameInContext("unique_stub", l->ctx);
+        last_stub = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), "last_stub");
         for (id = 0; id < pool_batch; id++) {
             int i;
-            sprintf(symname, "epilogue_stub_%" PRIu64, l->stub_created + id);
+            sprintf(symname, "unique_stub_%" PRIu64, l->stub_created + id);
             l->fn = LLVMAddFunction(l->mod, symname, l->tb_type);
             set_tb_func_attr(l, l->fn);
             LLVMPositionBuilderAtEnd(l->bldr, 
@@ -1078,13 +1117,7 @@ static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
             for (i = 0; i < l->nb_fastreg + 1; i++) {
                 args[i] = PARAM(i);
             }
-            ST(
-                LLVMBuildBitCast(l->bldr, l->fn, PTRTY(INTTY(8)), ""),
-                LLVMBuildIntToPtr(l->bldr,
-                    CONSTH((uintptr_t)&l->last_exec_stub),
-                    PTRTY(PTRTY(INTTY(8))), "last_exec_stub"
-                )
-            );
+            ST(l->fn, last_stub);
             call_instr = LLVMBuildCall2(l->bldr,
                 l->tb_type, get_epilogue(l), args, l->nb_fastreg + 1, "");
             set_tb_call_attr(l, call_instr);
@@ -1097,7 +1130,7 @@ static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
         tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
         check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
         for (id = 0; id < pool_batch; id++) {
-            sprintf(symname, "epilogue_stub_%" PRIu64, l->stub_created + id);
+            sprintf(symname, "unique_stub_%" PRIu64, l->stub_created + id);
             check_error(LLVMOrcLLJITLookup(l->jit, &addr, symname));
             g_ptr_array_add(l->stub_pool, (void *)addr);
         }
@@ -1109,11 +1142,11 @@ static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
     //log_disas(fn, 50);
     return fn;
 }
-static void free_epilogue_stub(TCGLLVMContext *l, void *fn)
+static void free_unique_stub(TCGLLVMContext *l, void *fn)
 {
     g_ptr_array_add(l->stub_pool, fn);
 }
-static target_ulong map_epilogue_stub(TCGLLVMContext *l, void *fn)
+static target_ulong map_unique_stub(TCGLLVMContext *l, void *fn)
 {
     return (target_ulong) (uintptr_t) g_hash_table_lookup(l->stub_map, fn);
 }
@@ -1146,13 +1179,15 @@ static void batch_compile(TCGLLVMContext *l)
     LLVMRunPassManager(l->mpm_inline, l->mod);
     dump_module(l->mod);
     qemu_log("LLVMRunPassManager end!\n");
-    static int dumpid = 0;
-    char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
-    FILE *fp = fopen(dumpf, "w");
-    char *str = LLVMPrintModuleToString(l->mod);
-    fputs(str, fp);
-    LLVMDisposeMessage(str);
-    fclose(fp);
+    if (0) {
+        static int dumpid = 0;
+        char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
+        FILE *fp = fopen(dumpf, "w");
+        char *str = LLVMPrintModuleToString(l->mod);
+        fputs(str, fp);
+        LLVMDisposeMessage(str);
+        fclose(fp);
+    }
     
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
@@ -1167,7 +1202,7 @@ static void batch_compile(TCGLLVMContext *l)
         if (g_hash_table_contains(l->tb_stubs, (void *)(uintptr_t)tb->pc)) {
             make_tb_symbol(symname, "stub", tb->pc);
             check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
-            free_epilogue_stub(l, *(void **)stub_addr);
+            free_unique_stub(l, *(void **)stub_addr);
             *(void **)stub_addr = (void *)func_addr;
             g_hash_table_remove(l->tb_stubs, (void *)(uintptr_t)tb->pc);
         }
@@ -1196,7 +1231,7 @@ static void batch_compile(TCGLLVMContext *l)
         }
         make_tb_symbol(symname, "stub", pc);
         check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
-        *(void **)stub_addr = alloc_epilogue_stub(l, pc);
+        *(void **)stub_addr = alloc_unique_stub(l, pc);
         g_hash_table_add(l->tb_stubs, (void *)(uintptr_t)pc);
     }
 
@@ -1218,11 +1253,13 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
         }
         batch_compile(l);
     }
+    pc2func_item(tb->pc).pc = tb->pc;
+    pc2func_item(tb->pc).func = tb->llvm_tc;
     //qemu_log("llvm exec! begin\n");
-    l->last_exec_stub = NULL;
+    l->last_stub = NULL;
     l->prologue(tb->llvm_tc, env);
-    if (l->last_exec_stub) {
-        target_ulong pc = map_epilogue_stub(l, l->last_exec_stub);
+    if (l->last_stub) {
+        target_ulong pc = map_unique_stub(l, l->last_stub);
         CPUState *cpu = env_cpu(env);
         CPUClass *cc = CPU_GET_CLASS(cpu);
         cc->set_pc(cpu, pc);
@@ -1250,29 +1287,29 @@ void tcg_llvm_remove_tb(TCGContext *s, TranslationBlock *tb)
     g_free(tb->packed_tcg.digest);
 }
 
+static void add_absolute_symbol(TCGLLVMContext *l, const char *name, void *addr)
+{
+    LLVMJITCSymbolMapPair sym;
+    memset(&sym, 0, sizeof(sym));
+    sym.Name = LLVMOrcExecutionSessionIntern(l->es, name);
+    sym.Sym.Address = (LLVMOrcJITTargetAddress) addr;
+    g_array_append_val(l->abssym, sym);
+}
+static void commit_absolute_symbol(TCGLLVMContext *l)
+{
+    check_error(LLVMOrcJITDylibDefine(l->jd,
+        LLVMOrcAbsoluteSymbols((void *) l->abssym->data, l->abssym->len)));
+    g_array_set_size(l->abssym, 0);
+}
+
 static void init_helpers(TCGLLVMContext *l)
 {
     int i;
-    LLVMJITCSymbolMapPair sym;
     char symname[MAX_SYMNAME];
-    GArray *helpers;
-
-    helpers = g_array_new(FALSE, TRUE, sizeof(LLVMJITCSymbolMapPair));
-
     for (i = 0; all_helpers[i].func; i++) {
         make_helper_symbol(symname, &all_helpers[i]);
-
-        memset(&sym, 0, sizeof(sym));
-        sym.Name = LLVMOrcExecutionSessionIntern(l->es, symname);
-        sym.Sym.Address = (LLVMOrcJITTargetAddress) all_helpers[i].func;
-
-        g_array_append_val(helpers, sym);
+        add_absolute_symbol(l, symname, all_helpers[i].func);
     }
-
-    check_error(LLVMOrcJITDylibDefine(l->jd,
-        LLVMOrcAbsoluteSymbols((void *) helpers->data, helpers->len)));
-    
-    g_array_free(helpers, TRUE);
 }
 
 static void init_prologue(TCGLLVMContext *l)
@@ -1346,6 +1383,7 @@ void tcg_llvm_context_init(TCGContext *s)
     LLVMOrcLLJITBuilderRef jb = NULL;
     LLVMPassManagerBuilderRef pmb;
     LLVMMetadataRef adomain, ascope;
+    LLVMTypeRef env_ptr_ty;
     LLVMTypeRef *tb_args;
     TCGLLVMContext *l = g_malloc0(sizeof(*l));
     s->llvm_ctx = l;
@@ -1423,6 +1461,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->hot_limit2 = 10000;
 
     l->env_ty = LLVMArrayType(INTTY(8), sizeof(CPUArchState));
+    env_ptr_ty = PTRTY(l->env_ty);
 
     l->tb_callconv = 10; /* GHC-CC */
     l->nb_fastreg = 0;
@@ -1443,9 +1482,18 @@ void tcg_llvm_context_init(TCGContext *s)
     tb_args[l->nb_fastreg] = PTRTY(l->env_ty);
     l->tb_type = LLVMFunctionType(VOIDTY, tb_args, l->nb_fastreg + 1, 0);
 
+    l->pc2func_ty = LLVMFunctionType(PTRTY(l->tb_type), &env_ptr_ty, 1, 0);
+
     l->helper_ty = LLVMFunctionType(INTTY(HBITS), NULL, 0, 1);
+
+    l->abssym = g_array_new(FALSE, TRUE, sizeof(LLVMJITCSymbolMapPair));
+
     init_prologue(l);
     init_helpers(l);
+    add_absolute_symbol(l, "last_stub", &l->last_stub);
+    add_absolute_symbol(l, "pc2func", pc2func);
+
+    commit_absolute_symbol(l);
 }
 
 void tcg_llvm_init(void)

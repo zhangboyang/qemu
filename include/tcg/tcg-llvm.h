@@ -1,7 +1,7 @@
 /*
  * QEMU TCG JIT using LLVM
  *
- * Copyright (C) 2020, Zhang Boyang <zhangboyang.id@gmail.com>
+ * Copyright (C) 2020, 2021, Zhang Boyang <zhangboyang.id@gmail.com>
  *
  * License: GNU GPL, version 2 or later.
  *   See the COPYING file in the top-level directory.
@@ -39,6 +39,7 @@ typedef struct TCGLLVMContext {
     LLVMOrcExecutionSessionRef es;
     LLVMPassManagerRef mpm_O2, mpm_inline;
     GChecksum *hasher;
+    GArray *abssym;
 
     /* Convenient values */
     LLVMAttributeRef attr_noalias;
@@ -58,6 +59,7 @@ typedef struct TCGLLVMContext {
     LLVMTypeRef tb_type;
     unsigned tb_callconv;
     LLVMTypeRef env_ty;
+    LLVMTypeRef pc2func_ty;
 
     GHashTable *tb_compiled;
     GHashTable *tb_stubs;
@@ -66,7 +68,7 @@ typedef struct TCGLLVMContext {
     GPtrArray *stub_pool;
     GHashTable *stub_map;
     uint64_t stub_created;
-    void *last_exec_stub;
+    void *last_stub;
 
     /* Fast registers */
     int nb_fastreg;
