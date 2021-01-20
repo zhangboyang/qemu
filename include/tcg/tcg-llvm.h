@@ -46,6 +46,7 @@ typedef struct TCGLLVMContext {
     LLVMAttributeRef attr_nounwind;
     LLVMAttributeRef attr_readnone;
     LLVMAttributeRef attr_readonly;
+    LLVMAttributeRef attr_inaccessiblememonly;
     unsigned md_aliasscope;
     unsigned md_noalias;
     LLVMValueRef env_scope;

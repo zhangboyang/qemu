@@ -438,15 +438,20 @@ static void set_helper_call_attr(TCGLLVMContext *l, LLVMValueRef instr, int idx)
     const TCGHelperInfo *info = &all_helpers[idx];
     LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
         l->attr_nounwind);
-    if ((info->flags & TCG_CALL_NO_READ_GLOBALS)) {
+
+    /* FIXME: safe? */
+    if ((info->flags & TCG_CALL_NO_RWG_SE) == TCG_CALL_NO_RWG_SE) {
         LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
             l->attr_readnone);
-    }
-    if ((info->flags & TCG_CALL_NO_WRITE_GLOBALS)) {
+    } else if ((info->flags & TCG_CALL_NO_WG_SE) == TCG_CALL_NO_WG_SE) {
         LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
             l->attr_readonly);
+    } else if ((info->flags & TCG_CALL_NO_RWG) == TCG_CALL_NO_RWG) {
+        LLVMAddCallSiteAttribute(instr, LLVMAttributeFunctionIndex,
+            l->attr_inaccessiblememonly);
+    } else if ((info->flags & TCG_CALL_NO_WG) == TCG_CALL_NO_WG) {
+        /* no suitable attribute */
     }
-    /* TODO: more tcg call flags */
 }
 
 static void make_tb_symbol(char *symname, const char *t, target_ulong pc)
@@ -538,8 +543,6 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
 {
     LLVMBasicBlockRef bb;
     const guint8 *buf, *buf_end;
-    LLVMBasicBlockRef switch_bb_delay = NULL;
-    LLVMValueRef next_tb;
 
     memset(l->temps, 0, sizeof(l->temps));
     g_hash_table_remove_all(l->labels);
@@ -593,17 +596,15 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
     buf = tb->packed_tcg.op_buf->data;
     buf_end = buf + tb->packed_tcg.op_buf->len;
     while (buf < buf_end) {
+        LLVMValueRef next_tb = NULL;
+        LLVMBasicBlockRef switch_bb_delay = NULL;
         TCGOpcode c;
         const TCGOpDef *def;
         int nb_oargs, nb_iargs, nb_cargs;
         uint64_t op_args[MAX_OPC_PARAM] = {};
+
         deserialize_op(&buf, &c, &nb_oargs, &nb_iargs, &nb_cargs, op_args);
         def = &tcg_op_defs[c];
-
-        if (switch_bb_delay) {
-            switch_bb(l, switch_bb_delay);
-            switch_bb_delay = NULL;
-        }
 
         switch (c) {
 
@@ -1013,20 +1014,8 @@ do { \
 
         case INDEX_op_goto_tb: {
             target_ulong next_pc = ARG1;
-            LLVMBasicBlockRef bb_exist = NEWBB("");
-            LLVMBasicBlockRef bb_notexist = NEWBB("");
-            LLVMValueRef exist_flag;
-            LLVMValueRef br_instr;
-
             next_tb = LD(get_tb_stub(l, next_pc));
-            exist_flag = LLVMBuildICmp(l->bldr, LLVMIntNE,
-                next_tb, LLVMConstPointerNull(TYOF(next_tb)), "");
-            exist_flag = CONST(1, 1); // FIXME
-            br_instr = CONDBR(exist_flag, bb_exist, bb_notexist);
-            LLVMSetMetadata(br_instr, l->md_prof, l->prof_likely);
-
-            switch_bb(l, bb_exist);
-            switch_bb_delay = bb_notexist;
+            switch_bb_delay = NEWBB("dead");
             goto chain_next_tb;
         }
         case INDEX_op_goto_ptr:
@@ -1057,6 +1046,10 @@ do { \
             tcg_abort();
             break;
         }
+
+        if (switch_bb_delay) {
+            switch_bb(l, switch_bb_delay);
+        }
     }
 
     //dump_module(l->mod);
@@ -1068,7 +1061,7 @@ static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
     void *fn;
     if (!l->stub_pool->len) {
         int id;
-        int pool_batch = 1;
+        int pool_batch = 100;
         char symname[MAX_SYMNAME];
         LLVMValueRef args[l->nb_fastreg + 1], call_instr;
         LLVMOrcThreadSafeModuleRef tsm;
@@ -1100,7 +1093,7 @@ static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
             LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
         }
         LLVMRunPassManager(l->mpm_O2, l->mod);
-        dump_module(l->mod);
+        //dump_module(l->mod);
         tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
         check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
         for (id = 0; id < pool_batch; id++) {
@@ -1113,7 +1106,7 @@ static void *alloc_epilogue_stub(TCGLLVMContext *l, target_ulong pc)
     }
     fn = g_ptr_array_remove_index_fast(l->stub_pool, 0);
     g_hash_table_replace(l->stub_map, fn, (void *)(uintptr_t)pc);
-    log_disas(fn, 50);
+    //log_disas(fn, 50);
     return fn;
 }
 static void free_epilogue_stub(TCGLLVMContext *l, void *fn)
@@ -1141,13 +1134,8 @@ static void batch_compile(TCGLLVMContext *l)
         g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)tb->pc);
     }
     for (i = 0; i < l->hot_tb->len; i++) {
-        LLVMValueRef stub;
         TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
         gen_code(l, tb);
-        stub = get_tb_stub(l, tb->pc);
-        LLVMSetInitializer(stub, l->fn);
-        LLVMSetGlobalConstant(stub, 1);
-        LLVMSetLinkage(stub, LLVMInternalLinkage);
     }
 
 
@@ -1399,6 +1387,8 @@ void tcg_llvm_context_init(TCGContext *s)
         ATTR_KINDID("readnone"), 0);
     l->attr_readonly = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("readonly"), 0);
+    l->attr_inaccessiblememonly = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("inaccessiblememonly"), 0);
     
 #define MD_KINDID(s) LLVMGetMDKindIDInContext(l->ctx, s, strlen(s))
     l->md_aliasscope = MD_KINDID("alias.scope");
@@ -1435,7 +1425,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->env_ty = LLVMArrayType(INTTY(8), sizeof(CPUArchState));
 
     l->tb_callconv = 10; /* GHC-CC */
-    l->nb_fastreg = 8;
+    l->nb_fastreg = 0;
 
     l->dummys = g_ptr_array_new();
     l->regmap = g_malloc_n(l->nb_fastreg, sizeof(*l->regmap));
