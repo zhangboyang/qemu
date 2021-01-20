@@ -37,7 +37,7 @@ typedef struct TCGLLVMContext {
     LLVMBuilderRef bldr;
     LLVMOrcJITDylibRef jd;
     LLVMOrcExecutionSessionRef es;
-    LLVMPassManagerRef mpm_O2, mpm_inline;
+    LLVMPassManagerRef mpm_O2, mpm_O2inline, mpm_alwaysinline;
     GChecksum *hasher;
     GArray *abssym;
 
@@ -45,21 +45,21 @@ typedef struct TCGLLVMContext {
     LLVMAttributeRef attr_noalias;
     LLVMAttributeRef attr_vaildenv;
     LLVMAttributeRef attr_nounwind;
+    LLVMAttributeRef attr_alwaysinline;
     LLVMAttributeRef attr_readnone;
     LLVMAttributeRef attr_readonly;
     LLVMAttributeRef attr_inaccessiblememonly;
+    LLVMAttributeRef attr_willreturn;
     unsigned md_aliasscope;
     unsigned md_noalias;
     LLVMValueRef env_scope;
     unsigned md_prof;
     LLVMValueRef prof_likely;
-    LLVMTypeRef helper_ty;
 
     /* Translate block */
     LLVMTypeRef tb_type;
     unsigned tb_callconv;
     LLVMTypeRef env_ty;
-    LLVMTypeRef pc2func_ty;
 
     GHashTable *tb_compiled;
     GHashTable *tb_stubs;
@@ -76,7 +76,11 @@ typedef struct TCGLLVMContext {
         uint32_t off;
         LLVMTypeRef ty;
     } *regmap;
-    GPtrArray *dummys;
+
+    /* Delayed inline functions */
+    GPtrArray *fn_qemu_ld;
+    GPtrArray *fn_qemu_st;
+    GPtrArray *fn_dummy;
 
     /* Temporary values */
     TCGLLVMTemp temps[TCG_MAX_TEMPS];

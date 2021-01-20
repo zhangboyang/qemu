@@ -27,6 +27,8 @@
 #define CAT(x, y) _CAT(x, y)
 #define CAT3(x, y, z) CAT(CAT(x, y), z)
 
+#define MAX_SYMNAME 128
+
 
 static void serialize(GByteArray *buf, const void *mem, size_t size)
 {
@@ -190,25 +192,27 @@ void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb)
 
 /* LLVM convenient macros */
 
-#define BLDR (l->bldr)
-
 /* HBITS: host word bits */
 #define HBITS TCG_TARGET_REG_BITS
 /* GBITS: guest word bits */
 #define GBITS TARGET_LONG_BITS
 
-/* Types for integers and pointer to integers */
+/* Types */
 #define VOIDTY LLVMVoidTypeInContext(l->ctx)
 #define INTTY(bits) CAT3(LLVMInt, bits, TypeInContext)(l->ctx)
 #define PTRTY(ty) LLVMPointerType(ty, 0)
 #define ELETY(ptr) LLVMGetElementType(ptr)
 #define TYOF(val) LLVMTypeOf(val)
+#define FUNCTY(ret_ty, ...) ({ \
+    LLVMTypeRef __functy_args[] = {__VA_ARGS__}; \
+    LLVMFunctionType(ret_ty, __functy_args, ARRAY_SIZE(__functy_args), 0); \
+})
 
 /* Function params */
 #define PARAM(n) LLVMGetParam(l->fn, n)
 
 /* Alloca */
-#define ALLOCAT(ty, name) LLVMBuildAlloca(BLDR, ty, name)
+#define ALLOCAT(ty, name) LLVMBuildAlloca(l->bldr, ty, name)
 #define ALLOCA(bits, name) ALLOCAT(INTTY(bits), name)
 #define ALLOCAH(name) ALLOCA(HBITS, name)
 
@@ -217,43 +221,27 @@ void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb)
 #define CONST(bits, c) CONSTT(INTTY(bits), c)
 #define CONSTH(c) CONST(HBITS, c)
 
-/* Alias scope */
-#define SCOPE_ENV(v) ({ \
-    LLVMValueRef __v = (v); \
-    LLVMSetMetadata(__v, l->md_aliasscope, l->env_scope); \
-    __v; \
-})
-#define NOALIAS_ENV(v) ({ \
-    LLVMValueRef __v = (v); \
-    LLVMSetMetadata(__v, l->md_noalias, l->env_scope); \
-    __v; \
-})
-
 /* Load and Store */
 #undef LD
 #undef ST
-#define LD(ptr) SCOPE_ENV(LLVMBuildLoad(BLDR, ptr, ""))
-#define ST(val, ptr) SCOPE_ENV(LLVMBuildStore(BLDR, val, ptr))
+#define LD(ptr) LLVMBuildLoad(l->bldr, ptr, "")
+#define ST(val, ptr) LLVMBuildStore(l->bldr, val, ptr)
 #define SET_VOLATILE(v) ({ \
-    LLVMValueRef __v = (v); \
-    LLVMSetVolatile(__v, 1); \
-    __v; \
+    LLVMValueRef __set_volatile_v = (v); \
+    LLVMSetVolatile(__set_volatile_v, 1); \
+    __set_volatile_v; \
 })
-#define QEMU_LD(ptr) \
-    SET_VOLATILE(NOALIAS_ENV(LLVMBuildLoad(BLDR, ptr, "")))
-#define QEMU_ST(val, ptr) \
-    SET_VOLATILE(NOALIAS_ENV(LLVMBuildStore(BLDR, val, ptr)))
 
 /* Arith Ops */
-#define ADD(x, y) LLVMBuildAdd(BLDR, x, y, "")
-#define SUB(x, y) LLVMBuildSub(BLDR, x, y, "")
-#define MUL(x, y) LLVMBuildMul(BLDR, x, y, "")
-#define DIV(x, y, div_kind) CAT3(LLVMBuild, div_kind, Div)(BLDR, x, y, "")
-#define REM(x, y, div_kind) CAT3(LLVMBuild, div_kind, Rem)(BLDR, x, y, "")
-#define AND(x, y) LLVMBuildAnd(BLDR, x, y, "")
-#define OR(x, y) LLVMBuildOr(BLDR, x, y, "")
-#define SHL(x, y) LLVMBuildShl(BLDR, x, y, "")
-#define SHR(x, y, shr_kind) CAT3(LLVMBuild, shr_kind, Shr)(BLDR, x, y, "")
+#define ADD(x, y) LLVMBuildAdd(l->bldr, x, y, "")
+#define SUB(x, y) LLVMBuildSub(l->bldr, x, y, "")
+#define MUL(x, y) LLVMBuildMul(l->bldr, x, y, "")
+#define DIV(x, y, div_kind) CAT3(LLVMBuild, div_kind, Div)(l->bldr, x, y, "")
+#define REM(x, y, div_kind) CAT3(LLVMBuild, div_kind, Rem)(l->bldr, x, y, "")
+#define AND(x, y) LLVMBuildAnd(l->bldr, x, y, "")
+#define OR(x, y) LLVMBuildOr(l->bldr, x, y, "")
+#define SHL(x, y) LLVMBuildShl(l->bldr, x, y, "")
+#define SHR(x, y, shr_kind) CAT3(LLVMBuild, shr_kind, Shr)(l->bldr, x, y, "")
 #define LSHR(x, y) SHR(x, y, L)
 #define ASHR(x, y) SHR(x, y, A)
 
@@ -261,24 +249,25 @@ void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb)
 #define NEWBB(name) LLVMAppendBasicBlockInContext(l->ctx, l->fn, name)
 
 /* Branch and Conditional branch */
-#define BR(dst) LLVMBuildBr(BLDR, dst)
-#define CONDBR(i1, t, f) LLVMBuildCondBr(BLDR, i1, t, f)
-#define INTCMP(x, y, tcg_cond) LLVMBuildICmp(BLDR, map_cond(tcg_cond), x, y, "")
-#define SELECT(cond, t, f) LLVMBuildSelect(BLDR, cond, t, f, "")
+#define BR(dst) LLVMBuildBr(l->bldr, dst)
+#define CONDBR(i1, t, f) LLVMBuildCondBr(l->bldr, i1, t, f)
+#define SELECT(i1, t, f) LLVMBuildSelect(l->bldr, i1, t, f, "")
+#define INTCMP(x, y, tcg_cond) \
+    LLVMBuildICmp(l->bldr, map_cond(tcg_cond), x, y, "")
 #define CMPBR(x, y, tcg_cond, t, f) CONDBR(INTCMP(x, y, tcg_cond), t, f)
 
 /* Convert pointers */
-#define P2I(p) LLVMBuildPtrToInt(BLDR, p, INTTY(HBITS), "")
-#define I2P(i, bits) LLVMBuildIntToPtr(BLDR, i, PTRTY(INTTY(bits)), "")
+#define P2I(p) LLVMBuildPtrToInt(l->bldr, p, INTTY(HBITS), "")
+#define I2P(i, ty) LLVMBuildIntToPtr(l->bldr, i, PTRTY(ty), "")
 
 /* Get &env[offset], using GEP and bitcast */
 #define ENV(off, ty, name) ({ \
-        LLVMValueRef __off_value[] = {CONSTH(0), CONSTH(off)}; \
-        LLVMBuildBitCast(BLDR, \
-            LLVMBuildInBoundsGEP2(BLDR, \
+        LLVMValueRef __env_off_value[] = {CONSTH(0), CONSTH(off)}; \
+        LLVMBuildBitCast(l->bldr, \
+            LLVMBuildInBoundsGEP2(l->bldr, \
                 l->env_ty, \
                 l->env, \
-                __off_value, ARRAY_SIZE(__off_value), \
+                __env_off_value, ARRAY_SIZE(__env_off_value), \
                 "" \
             ), \
             PTRTY(ty), \
@@ -287,13 +276,27 @@ void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb)
     })
 
 /* Extend or truncate integers */
-#define TRUNC(val, dst_bits) LLVMBuildTrunc(BLDR, val, INTTY(dst_bits), "")
+#define TRUNC(val, dst_bits) LLVMBuildTrunc(l->bldr, val, INTTY(dst_bits), "")
 #define EXTEND(val, dst_bits, ext_kind) \
-    CAT3(LLVMBuild, ext_kind, Ext)(BLDR, val, INTTY(dst_bits), "")
+    CAT3(LLVMBuild, ext_kind, Ext)(l->bldr, val, INTTY(dst_bits), "")
 #define ZEXT(val, dst_bits) EXTEND(val, dst_bits, Z)
 #define SEXT(val, dst_bits) EXTEND(val, dst_bits, S)
 #define TZEXT(val, src_bits, dst_bits) ZEXT(TRUNC(val, src_bits), dst_bits)
 #define TSEXT(val, src_bits, dst_bits) SEXT(TRUNC(val, src_bits), dst_bits)
+
+/* Function call */
+#define CALL(fn, ...) ({ \
+    LLVMValueRef __call_args[] = {__VA_ARGS__}; \
+    LLVMBuildCall(l->bldr, fn, __call_args, ARRAY_SIZE(__call_args), ""); \
+})
+#define INTRINSIC(name, ...) ({ \
+    LLVMTypeRef __intrinsic_overload_ty[] = {__VA_ARGS__}; \
+    LLVMGetIntrinsicDeclaration(l->mod, \
+        LLVMLookupIntrinsicID(name, strlen(name)), \
+        __intrinsic_overload_ty, ARRAY_SIZE(__intrinsic_overload_ty)); \
+})
+
+
 
 
 /* Map TCG Condition to LLVM Integer Predicate */
@@ -357,46 +360,12 @@ static void set_tb_call_attr(TCGLLVMContext *l, LLVMValueRef instr)
     QLLVMSetMustTailCall(instr, 1);
 }
 
-/* Build a call to llvm intrinsic
- *  call_intrinsic(l,
- *      "llvm.foo.bar",
- *      [Overload types], NULL,
- *      [Arg values], NULL
- *  );
- */
-static LLVMValueRef call_intrinsic(TCGLLVMContext *l, const char *name, ...)
-{
-#define MAX_INTRINSIC_ARGS 10
-    va_list ap;
-    int nty = 0;
-    int narg = 0;
-    LLVMTypeRef ty[MAX_INTRINSIC_ARGS + 1], t;
-    LLVMValueRef arg[MAX_INTRINSIC_ARGS + 1], a;
-    LLVMValueRef fn;
-    unsigned iid;
-    
-    va_start(ap, name);
-    while ((t = va_arg(ap, LLVMTypeRef))) {
-        if (nty >= MAX_INTRINSIC_ARGS) tcg_abort();
-        ty[nty++] = t;
-    }
-    while ((a = va_arg(ap, LLVMValueRef))) {
-        if (narg >= MAX_INTRINSIC_ARGS) tcg_abort();
-        arg[narg++] = a;
-    }
-    va_end(ap);
 
-    iid = LLVMLookupIntrinsicID(name, strlen(name));
-    fn = LLVMGetIntrinsicDeclaration(l->mod, iid, ty, nty);
-    return LLVMBuildCall2(l->bldr, ELETY(TYOF(fn)), fn, arg, narg, "");
-}
-
-
-/* Get basic block of tcg-op arg label */
+/* Get basic block of tcg label */
 static LLVMBasicBlockRef get_label(TCGLLVMContext *l, unsigned label_id)
 {
     if (!g_hash_table_contains(l->labels, GINT_TO_POINTER(label_id))) {
-        char buf[32];
+        char buf[MAX_SYMNAME];
         sprintf(buf, "L%u", label_id);
         g_hash_table_insert(l->labels, GINT_TO_POINTER(label_id), NEWBB(buf));
     }
@@ -414,13 +383,11 @@ static void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
 
 
 
-#define MAX_SYMNAME 128
 static void make_helper_symbol(char *symname, const TCGHelperInfo *info)
 {
     snprintf(symname, MAX_SYMNAME,
         "helper_%ld_%s", info - all_helpers, info->name);
 }
-
 static LLVMValueRef get_helper(TCGLLVMContext *l, int idx)
 {
     LLVMValueRef fn;
@@ -428,7 +395,8 @@ static LLVMValueRef get_helper(TCGLLVMContext *l, int idx)
     make_helper_symbol(symname, &all_helpers[idx]);
     fn = LLVMGetNamedFunction(l->mod, symname);
     if (!fn) {
-        fn = LLVMAddFunction(l->mod, symname, l->helper_ty);
+        fn = LLVMAddFunction(l->mod, symname,
+            LLVMFunctionType(INTTY(HBITS), NULL, 0, 1));
         LLVMSetLinkage(fn, LLVMExternalLinkage);
     }
     return fn;
@@ -502,51 +470,134 @@ static LLVMValueRef get_epilogue(TCGLLVMContext *l)
     }
     return fn;
 }
-
 static LLVMValueRef get_pc2func(TCGLLVMContext *l)
 {
     LLVMValueRef fn;
     fn = LLVMGetNamedFunction(l->mod, "pc2func");
     if (!fn) {
-        fn = LLVMAddFunction(l->mod, "pc2func", l->pc2func_ty);
+        fn = LLVMAddFunction(l->mod, "pc2func",
+            FUNCTY(PTRTY(l->tb_type), PTRTY(l->env_ty)));
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
             l->attr_nounwind);
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
             l->attr_readonly);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_willreturn);
     }
     return fn;
 }
 
-
-static void remove_dummy(TCGLLVMContext *l)
+static LLVMValueRef get_qemu_ld(TCGLLVMContext *l, LLVMTypeRef ty)
+{
+    LLVMValueRef fn;
+    char symname[MAX_SYMNAME];
+    sprintf(symname, "qemu_ld_i%u", LLVMGetIntTypeWidth(ty));
+    fn = LLVMGetNamedFunction(l->mod, symname);
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, symname, FUNCTY(ty, INTTY(HBITS)));
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_nounwind);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_inaccessiblememonly);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_willreturn);
+        g_ptr_array_add(l->fn_qemu_ld, fn);
+    }
+    return fn;
+}
+static void define_qemu_ld(TCGLLVMContext *l)
 {
     unsigned i;
-    for (i = 0; i < l->dummys->len; i++) {
-        LLVMValueRef dummy = g_ptr_array_index(l->dummys, i);
-        LLVMSetInitializer(dummy, LLVMGetUndef(ELETY(TYOF(dummy))));
+    for (i = 0; i < l->fn_qemu_ld->len; i++) {
+        l->fn = g_ptr_array_index(l->fn_qemu_ld, i);
+        LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
+            l->attr_alwaysinline);
+        LLVMRemoveEnumAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
+            LLVMGetEnumAttributeKind(l->attr_inaccessiblememonly));
+        LLVMPositionBuilderAtEnd(l->bldr, 
+            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+        LLVMBuildRet(l->bldr,
+            SET_VOLATILE(LD(I2P(PARAM(0), LLVMGetReturnType(ELETY(TYOF(l->fn)))))));
+        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
     }
-    g_ptr_array_set_size(l->dummys, 0);
+    g_ptr_array_set_size(l->fn_qemu_ld, 0);
+}
+static LLVMValueRef get_qemu_st(TCGLLVMContext *l, LLVMTypeRef ty)
+{
+    LLVMValueRef fn;
+    char symname[MAX_SYMNAME];
+    sprintf(symname, "qemu_st_i%u", LLVMGetIntTypeWidth(ty));
+    fn = LLVMGetNamedFunction(l->mod, symname);
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, symname, FUNCTY(VOIDTY, ty, INTTY(HBITS)));
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_nounwind);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_inaccessiblememonly);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_willreturn);
+        g_ptr_array_add(l->fn_qemu_st, fn);
+    }
+    return fn;
+}
+static void define_qemu_st(TCGLLVMContext *l)
+{
+    unsigned i;
+    for (i = 0; i < l->fn_qemu_st->len; i++) {
+        l->fn = g_ptr_array_index(l->fn_qemu_st, i);
+        LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
+            l->attr_alwaysinline);
+        LLVMRemoveEnumAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
+            LLVMGetEnumAttributeKind(l->attr_inaccessiblememonly));
+        LLVMPositionBuilderAtEnd(l->bldr, 
+            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+        SET_VOLATILE(ST(PARAM(0), I2P(PARAM(1), TYOF(PARAM(0)))));
+        LLVMBuildRetVoid(l->bldr);
+        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
+    }
+    g_ptr_array_set_size(l->fn_qemu_st, 0);
+}
+
+
+static void define_dummy(TCGLLVMContext *l)
+{
+    unsigned i;
+    for (i = 0; i < l->fn_dummy->len; i++) {
+        l->fn = g_ptr_array_index(l->fn_dummy, i);
+        LLVMPositionBuilderAtEnd(l->bldr, 
+            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+        LLVMBuildRet(l->bldr,
+            LLVMGetUndef(LLVMGetReturnType(ELETY(TYOF(l->fn)))));
+        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
+    }
+    g_ptr_array_set_size(l->fn_dummy, 0);
 }
 static LLVMValueRef get_dummy(TCGLLVMContext *l, LLVMTypeRef ty)
 {
-    LLVMValueRef dummy;
-    char dummy_name[32];
-    sprintf(dummy_name, "dummy%u", LLVMGetIntTypeWidth(ty));
-    dummy = LLVMGetNamedGlobal(l->mod, dummy_name);
-    if (!dummy) {
-        dummy = LLVMAddGlobal(l->mod, ty, dummy_name);
-        LLVMSetGlobalConstant(dummy, 1);
-        LLVMSetLinkage(dummy, LLVMInternalLinkage);
-        g_ptr_array_add(l->dummys, dummy);
+    LLVMValueRef fn;
+    char symname[MAX_SYMNAME];
+    sprintf(symname, "dummy%u", LLVMGetIntTypeWidth(ty));
+    fn = LLVMGetNamedFunction(l->mod, symname);
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, symname, FUNCTY(ty));
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_readnone);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_willreturn);
+        g_ptr_array_add(l->fn_dummy, fn);
     }
-    return dummy;
+    return fn;
 }
+
 static void sync_fastreg(TCGLLVMContext *l, bool use_dummy)
 {
     int i;
     for (i = 0; i < l->nb_fastreg; i++) {
         ST(
-            use_dummy ? LD(get_dummy(l, l->regmap[i].ty)) : PARAM(i),
+            use_dummy ? CALL(get_dummy(l, l->regmap[i].ty)) : PARAM(i),
             ENV(l->regmap[i].off, l->regmap[i].ty, "")
         );
     }
@@ -723,21 +774,21 @@ do { \
 
 
 #define OP_ARITH2(op2) \
-    ST0(CAT(LLVMBuild, op2)(BLDR, ARG1R, ARG2R, ""))
+    ST0(CAT(LLVMBuild, op2)(l->bldr, ARG1R, ARG2R, ""))
 #define OP_ARITH1(op1) \
-    ST0(CAT(LLVMBuild, op1)(BLDR, ARG1R, ""))
+    ST0(CAT(LLVMBuild, op1)(l->bldr, ARG1R, ""))
 #define OP_ARITH12(op1, op2) \
     ST0( \
-        CAT(LLVMBuild, op1)(BLDR, \
-            CAT(LLVMBuild, op2)(BLDR, ARG1R, ARG2R, ""), \
+        CAT(LLVMBuild, op1)(l->bldr, \
+            CAT(LLVMBuild, op2)(l->bldr, ARG1R, ARG2R, ""), \
             "" \
         ) \
     )
 #define OP_ARITH21(op2, op1) \
     ST0( \
-        CAT(LLVMBuild, op2)(BLDR, \
+        CAT(LLVMBuild, op2)(l->bldr, \
             ARG1R, \
-            CAT(LLVMBuild, op1)(BLDR, ARG2R, ""), \
+            CAT(LLVMBuild, op1)(l->bldr, ARG2R, ""), \
             "" \
         ) \
     )
@@ -848,9 +899,9 @@ do { \
 
 #define OP_EXTRACT2(bits) \
     ST0( \
-        call_intrinsic(l, "llvm.fshr", \
-            INTTY(bits), NULL, \
-            ARG2R, ARG1R, CONST(bits, ARG3), NULL \
+        CALL( \
+            INTRINSIC("llvm.fshr", INTTY(bits)), \
+            ARG2R, ARG1R, CONST(bits, ARG3) \
         ) \
     )
         case INDEX_op_extract2_i32:  OP_EXTRACT2(32); break;
@@ -861,9 +912,9 @@ do { \
 #define OP_BSWAP(swap_bits, dst_bits) \
     ST0( \
         ZEXT( \
-            call_intrinsic(l, \
-                "llvm.bswap", INTTY(swap_bits), NULL, \
-                TRUNC(ARG1R, swap_bits), NULL \
+            CALL( \
+                INTRINSIC("llvm.bswap", INTTY(swap_bits)), \
+                TRUNC(ARG1R, swap_bits) \
             ), \
             dst_bits \
         ) \
@@ -878,9 +929,9 @@ do { \
 
 #define OP_ROT(name, bits) \
     ST0( \
-        call_intrinsic(l, \
-            name, INTTY(bits), NULL, \
-            ARG1R, ARG1R, ARG2R, NULL \
+        CALL( \
+            INTRINSIC(name, INTTY(bits)), \
+            ARG1R, ARG1R, ARG2R \
         ) \
     )
         case INDEX_op_rotl_i32: OP_ROT("llvm.fshl", 32); break;
@@ -894,9 +945,9 @@ do { \
     ST0( \
         SELECT( \
             INTCMP(ARG1R, CONST(bits, 0), TCG_COND_NE), \
-            call_intrinsic(l, \
-                name, INTTY(bits), NULL, \
-                ARG1R, CONST(1, 0), NULL \
+            CALL( \
+                INTRINSIC(name, INTTY(bits)), \
+                ARG1R, CONST(1, 0) \
             ), \
             ARG2R \
         ) \
@@ -953,7 +1004,12 @@ do { \
 
 // XXX: memory barrier!!! and endian swap
 #define OP_QEMU_LD_HELPER(src_bits, dst_bits, ext_kind) \
-    ST0(EXTEND(QEMU_LD(I2P(ARG1R, src_bits)), dst_bits, ext_kind))
+    ST0( \
+        EXTEND( \
+            CALL(get_qemu_ld(l, INTTY(src_bits)), ARG1R), \
+            dst_bits, \
+        ext_kind) \
+    )
 #define OP_QEMU_LD(bits) \
 do { \
     tcg_debug_assert(guest_base == 0); \
@@ -975,7 +1031,7 @@ do { \
 #endif
 
 #define OP_QEMU_ST_HELPER(bits) \
-    QEMU_ST(TRUNC(ARG0R, bits), I2P(ARG1R, bits))
+    CALL(get_qemu_st(l, INTTY(bits)), TRUNC(ARG0R, bits), ARG1R)
         case INDEX_op_qemu_st_i32:
 #if HBITS == 64
         case INDEX_op_qemu_st_i64:
@@ -1033,8 +1089,7 @@ do { \
             goto chain_next_tb;
         }
         case INDEX_op_goto_ptr: {
-            next_tb = LLVMBuildCall2(l->bldr,
-                l->pc2func_ty, get_pc2func(l), &l->env, 1, "");
+            next_tb = CALL(get_pc2func(l), l->env);
             goto chain_next_tb;
         }
         case INDEX_op_exit_tb: {
@@ -1175,11 +1230,14 @@ static void batch_compile(TCGLLVMContext *l)
     qemu_log("LLVMRunPassManager bgein!\n");
     //dump_module(l->mod);
     LLVMRunPassManager(l->mpm_O2, l->mod);
-    remove_dummy(l);
-    LLVMRunPassManager(l->mpm_inline, l->mod);
-    dump_module(l->mod);
-    qemu_log("LLVMRunPassManager end!\n");
-    if (0) {
+    define_dummy(l);
+    LLVMRunPassManager(l->mpm_O2inline, l->mod);
+    //dump_module(l->mod);
+    define_qemu_ld(l);
+    define_qemu_st(l);
+    LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
+    LLVMRunPassManager(l->mpm_O2, l->mod);
+    if (1) {
         static int dumpid = 0;
         char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
         FILE *fp = fopen(dumpf, "w");
@@ -1188,6 +1246,9 @@ static void batch_compile(TCGLLVMContext *l)
         LLVMDisposeMessage(str);
         fclose(fp);
     }
+    dump_module(l->mod);
+    qemu_log("LLVMRunPassManager end!\n");
+
     
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
@@ -1315,8 +1376,7 @@ static void init_helpers(TCGLLVMContext *l)
 static void init_prologue(TCGLLVMContext *l)
 {
     int i;
-    LLVMTypeRef prologue_argty[2] = {PTRTY(INTTY(8)), PTRTY(l->env_ty)};
-    LLVMValueRef prologue_argvl[l->nb_fastreg + 1];
+    LLVMValueRef args[l->nb_fastreg + 1];
     LLVMValueRef prologue_call;
     LLVMOrcThreadSafeModuleRef tsm;
     LLVMOrcJITTargetAddress addr;
@@ -1324,18 +1384,18 @@ static void init_prologue(TCGLLVMContext *l)
     l->mod = LLVMModuleCreateWithNameInContext("prologue", l->ctx);
 
     l->fn = LLVMAddFunction(l->mod, "prologue", 
-        LLVMFunctionType(VOIDTY, prologue_argty, 2, 0));
+        FUNCTY(VOIDTY, PTRTY(INTTY(8)), PTRTY(l->env_ty)));
     LLVMPositionBuilderAtEnd(l->bldr, 
         LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
     l->env = PARAM(1);
     for (i = 0; i < l->nb_fastreg; i++) {
-        prologue_argvl[i] = LD(ENV(l->regmap[i].off, l->regmap[i].ty, ""));
+        args[i] = LD(ENV(l->regmap[i].off, l->regmap[i].ty, ""));
     }
-    prologue_argvl[l->nb_fastreg] = l->env;
+    args[l->nb_fastreg] = l->env;
     prologue_call = LLVMBuildCall2(l->bldr,
         l->tb_type,
         LLVMBuildBitCast(l->bldr, PARAM(0), PTRTY(l->tb_type), ""),
-        prologue_argvl, l->nb_fastreg + 1, "");
+        args, l->nb_fastreg + 1, "");
     set_tb_call_attr(l, prologue_call);
     QLLVMSetMustTailCall(prologue_call, 0);
     LLVMBuildRetVoid(l->bldr);
@@ -1350,7 +1410,7 @@ static void init_prologue(TCGLLVMContext *l)
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
     LLVMRunPassManager(l->mpm_O2, l->mod);
-    dump_module(l->mod);
+    //dump_module(l->mod);
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
@@ -1382,8 +1442,6 @@ void tcg_llvm_context_init(TCGContext *s)
     int i;
     LLVMOrcLLJITBuilderRef jb = NULL;
     LLVMPassManagerBuilderRef pmb;
-    LLVMMetadataRef adomain, ascope;
-    LLVMTypeRef env_ptr_ty;
     LLVMTypeRef *tb_args;
     TCGLLVMContext *l = g_malloc0(sizeof(*l));
     s->llvm_ctx = l;
@@ -1407,12 +1465,16 @@ void tcg_llvm_context_init(TCGContext *s)
     LLVMPassManagerBuilderPopulateModulePassManager(pmb, l->mpm_O2);
     LLVMPassManagerBuilderDispose(pmb);
 
-    l->mpm_inline = LLVMCreatePassManager();
+    l->mpm_O2inline = LLVMCreatePassManager();
     pmb = LLVMPassManagerBuilderCreate();
     LLVMPassManagerBuilderSetOptLevel(pmb, 2);
     LLVMPassManagerBuilderUseInlinerWithThreshold(pmb, 100000);
-    LLVMPassManagerBuilderPopulateModulePassManager(pmb, l->mpm_inline);
+    LLVMPassManagerBuilderPopulateModulePassManager(pmb, l->mpm_O2inline);
     LLVMPassManagerBuilderDispose(pmb);
+
+    l->mpm_alwaysinline = LLVMCreatePassManager();
+    LLVMAddAlwaysInlinerPass(l->mpm_alwaysinline);
+    
 
 #define ATTR_KINDID(s) LLVMGetEnumAttributeKindForName(s, strlen(s))
     l->attr_noalias = LLVMCreateEnumAttribute(l->ctx,
@@ -1421,28 +1483,27 @@ void tcg_llvm_context_init(TCGContext *s)
         ATTR_KINDID("dereferenceable"), sizeof(CPUArchState));
     l->attr_nounwind = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("nounwind"), 0);
+    l->attr_alwaysinline = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("alwaysinline"), 0);
     l->attr_readnone = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("readnone"), 0);
     l->attr_readonly = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("readonly"), 0);
     l->attr_inaccessiblememonly = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("inaccessiblememonly"), 0);
+    l->attr_willreturn = LLVMCreateEnumAttribute(l->ctx,
+        ATTR_KINDID("willreturn"), 0);
     
 #define MD_KINDID(s) LLVMGetMDKindIDInContext(l->ctx, s, strlen(s))
-    l->md_aliasscope = MD_KINDID("alias.scope");
-    l->md_noalias = MD_KINDID("noalias");
     l->md_prof = MD_KINDID("prof");
 
 #define MD_STRING(s) LLVMMDStringInContext2(l->ctx, s, strlen(s))
 #define MD_NODE(...) ({ \
-    LLVMMetadataRef __args[] = {__VA_ARGS__}; \
-    LLVMMDNodeInContext2(l->ctx, __args, ARRAY_SIZE(__args)); \
+    LLVMMetadataRef __md_node_args[] = {__VA_ARGS__}; \
+    LLVMMDNodeInContext2(l->ctx, __md_node_args, ARRAY_SIZE(__md_node_args)); \
 })
 #define MD2VAL(md) LLVMMetadataAsValue(l->ctx, md)
 #define VAL2MD(val) LLVMValueAsMetadata(val)
-    adomain = MD_NODE(MD_STRING("qemu_domain"));
-    ascope = MD_NODE(MD_STRING("env_scope"), adomain);
-    l->env_scope = MD2VAL(MD_NODE(ascope));
     l->prof_likely = MD2VAL(MD_NODE(MD_STRING("branch_weights"),
         VAL2MD(CONST(32, 2000)), VAL2MD(CONST(32, 1))));
 
@@ -1461,12 +1522,14 @@ void tcg_llvm_context_init(TCGContext *s)
     l->hot_limit2 = 10000;
 
     l->env_ty = LLVMArrayType(INTTY(8), sizeof(CPUArchState));
-    env_ptr_ty = PTRTY(l->env_ty);
+
+    l->fn_qemu_ld = g_ptr_array_new();
+    l->fn_qemu_st = g_ptr_array_new();
+    l->fn_dummy = g_ptr_array_new();
 
     l->tb_callconv = 10; /* GHC-CC */
     l->nb_fastreg = 0;
 
-    l->dummys = g_ptr_array_new();
     l->regmap = g_malloc_n(l->nb_fastreg, sizeof(*l->regmap));
     for (i = 0; i < l->nb_fastreg; i++) {
         l->regmap[i].off = i * (GBITS / 8),
@@ -1482,9 +1545,7 @@ void tcg_llvm_context_init(TCGContext *s)
     tb_args[l->nb_fastreg] = PTRTY(l->env_ty);
     l->tb_type = LLVMFunctionType(VOIDTY, tb_args, l->nb_fastreg + 1, 0);
 
-    l->pc2func_ty = LLVMFunctionType(PTRTY(l->tb_type), &env_ptr_ty, 1, 0);
 
-    l->helper_ty = LLVMFunctionType(INTTY(HBITS), NULL, 0, 1);
 
     l->abssym = g_array_new(FALSE, TRUE, sizeof(LLVMJITCSymbolMapPair));
 
