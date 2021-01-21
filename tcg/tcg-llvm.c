@@ -494,12 +494,11 @@ static LLVMValueRef get_qemu_ld(TCGLLVMContext *l, LLVMTypeRef ty)
     sprintf(symname, "qemu_ld_i%u", LLVMGetIntTypeWidth(ty));
     fn = LLVMGetNamedFunction(l->mod, symname);
     if (!fn) {
-        fn = LLVMAddFunction(l->mod, symname,
-            FUNCTY(ty, PTRTY(INTTY(8)), INTTY(HBITS)));
+        fn = LLVMAddFunction(l->mod, symname, FUNCTY(ty, INTTY(HBITS)));
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
             l->attr_nounwind);
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-            l->attr_argmemonly);
+            l->attr_inaccessiblememonly);
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
             l->attr_willreturn);
         g_ptr_array_add(l->fn_qemu_ld, fn);
@@ -514,15 +513,11 @@ static void define_qemu_ld(TCGLLVMContext *l)
         LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
             l->attr_alwaysinline);
         LLVMRemoveEnumAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
-            LLVMGetEnumAttributeKind(l->attr_argmemonly));
+            LLVMGetEnumAttributeKind(l->attr_inaccessiblememonly));
         LLVMPositionBuilderAtEnd(l->bldr, 
             LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
         LLVMBuildRet(l->bldr,
-            SET_VOLATILE(LD(
-                I2P(
-                    PARAM(1),
-                    LLVMGetReturnType(ELETY(TYOF(l->fn)))
-                ))));
+            SET_VOLATILE(LD(I2P(PARAM(0), LLVMGetReturnType(ELETY(TYOF(l->fn)))))));
         LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
         LLVMSetLinkage(l->fn, LLVMInternalLinkage);
     }
@@ -535,12 +530,11 @@ static LLVMValueRef get_qemu_st(TCGLLVMContext *l, LLVMTypeRef ty)
     sprintf(symname, "qemu_st_i%u", LLVMGetIntTypeWidth(ty));
     fn = LLVMGetNamedFunction(l->mod, symname);
     if (!fn) {
-        fn = LLVMAddFunction(l->mod, symname,
-            FUNCTY(VOIDTY, PTRTY(INTTY(8)), ty, INTTY(HBITS)));
+        fn = LLVMAddFunction(l->mod, symname, FUNCTY(VOIDTY, ty, INTTY(HBITS)));
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
             l->attr_nounwind);
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-            l->attr_argmemonly);
+            l->attr_inaccessiblememonly);
         LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
             l->attr_willreturn);
         g_ptr_array_add(l->fn_qemu_st, fn);
@@ -555,10 +549,10 @@ static void define_qemu_st(TCGLLVMContext *l)
         LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
             l->attr_alwaysinline);
         LLVMRemoveEnumAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
-            LLVMGetEnumAttributeKind(l->attr_argmemonly));
+            LLVMGetEnumAttributeKind(l->attr_inaccessiblememonly));
         LLVMPositionBuilderAtEnd(l->bldr, 
             LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
-        SET_VOLATILE(ST(PARAM(1), I2P(PARAM(2), TYOF(PARAM(1)))));
+        SET_VOLATILE(ST(PARAM(0), I2P(PARAM(1), TYOF(PARAM(0)))));
         LLVMBuildRetVoid(l->bldr);
         LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
         LLVMSetLinkage(l->fn, LLVMInternalLinkage);
@@ -613,7 +607,6 @@ static void sync_fastreg(TCGLLVMContext *l, bool use_dummy)
 static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
 {
     LLVMBasicBlockRef bb;
-    LLVMValueRef guest_mem_placeholder;
     const guint8 *buf, *buf_end;
 
     memset(l->temps, 0, sizeof(l->temps));
@@ -624,12 +617,6 @@ static void gen_code(TCGLLVMContext *l, TranslationBlock *tb)
     l->env = PARAM(l->nb_fastreg);
     bb = LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry");
     LLVMPositionBuilderAtEnd(l->bldr, bb);
-
-    guest_mem_placeholder = LLVMGetNamedGlobal(l->mod, "guest_mem_placeholder");
-    if (!guest_mem_placeholder) {
-        guest_mem_placeholder = LLVMAddGlobal(l->mod,
-            INTTY(8), "guest_mem_placeholder");
-    }
 
 #define is_env(idx) (strcmp(l->temps[idx].name, "env") == 0)
     buf = tb->packed_tcg.temp_buf->data;
@@ -1019,10 +1006,7 @@ do { \
 #define OP_QEMU_LD_HELPER(src_bits, dst_bits, ext_kind) \
     ST0( \
         EXTEND( \
-            CALL( \
-                get_qemu_ld(l, INTTY(src_bits)), \
-                guest_mem_placeholder, ARG1R \
-            ), \
+            CALL(get_qemu_ld(l, INTTY(src_bits)), ARG1R), \
             dst_bits, \
         ext_kind) \
     )
@@ -1047,10 +1031,7 @@ do { \
 #endif
 
 #define OP_QEMU_ST_HELPER(bits) \
-    CALL( \
-        get_qemu_st(l, INTTY(bits)), \
-        guest_mem_placeholder, TRUNC(ARG0R, bits), ARG1R \
-    )
+    CALL(get_qemu_st(l, INTTY(bits)), TRUNC(ARG0R, bits), ARG1R)
         case INDEX_op_qemu_st_i32:
 #if HBITS == 64
         case INDEX_op_qemu_st_i64:
@@ -1251,6 +1232,11 @@ static void batch_compile(TCGLLVMContext *l)
     LLVMRunPassManager(l->mpm_O2, l->mod);
     define_dummy(l);
     LLVMRunPassManager(l->mpm_O2inline, l->mod);
+    //dump_module(l->mod);
+    define_qemu_ld(l);
+    define_qemu_st(l);
+    LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
+    LLVMRunPassManager(l->mpm_O2, l->mod);
     if (1) {
         static int dumpid = 0;
         char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
@@ -1260,11 +1246,6 @@ static void batch_compile(TCGLLVMContext *l)
         LLVMDisposeMessage(str);
         fclose(fp);
     }
-    //dump_module(l->mod);
-    define_qemu_ld(l);
-    define_qemu_st(l);
-    LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
-    LLVMRunPassManager(l->mpm_O2, l->mod);
     dump_module(l->mod);
     qemu_log("LLVMRunPassManager end!\n");
 
@@ -1508,8 +1489,6 @@ void tcg_llvm_context_init(TCGContext *s)
         ATTR_KINDID("readnone"), 0);
     l->attr_readonly = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("readonly"), 0);
-    l->attr_argmemonly = LLVMCreateEnumAttribute(l->ctx,
-        ATTR_KINDID("argmemonly"), 0);
     l->attr_inaccessiblememonly = LLVMCreateEnumAttribute(l->ctx,
         ATTR_KINDID("inaccessiblememonly"), 0);
     l->attr_willreturn = LLVMCreateEnumAttribute(l->ctx,
