@@ -18,6 +18,7 @@
 #include <llvm-c/Transforms/Utils.h>
 #include <llvm-c/Transforms/Scalar.h>
 #include <llvm-c/Transforms/IPO.h>
+#include <llvm-c/Support.h>
 
 #ifdef CONFIG_SOFTMMU
 #error LLVM + SOFTMMU Not supported
@@ -1227,16 +1228,9 @@ static void batch_compile(TCGLLVMContext *l)
     }
 
 
-    qemu_log("LLVMRunPassManager bgein!\n");
+    qemu_log("LLVMRunPassManager bgein! (n=%u)\n", l->hot_tb->len);
     //dump_module(l->mod);
-    LLVMRunPassManager(l->mpm_O2, l->mod);
-    define_dummy(l);
     LLVMRunPassManager(l->mpm_O2inline, l->mod);
-    //dump_module(l->mod);
-    define_qemu_ld(l);
-    define_qemu_st(l);
-    LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
-    LLVMRunPassManager(l->mpm_O2, l->mod);
     if (1) {
         static int dumpid = 0;
         char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
@@ -1246,6 +1240,12 @@ static void batch_compile(TCGLLVMContext *l)
         LLVMDisposeMessage(str);
         fclose(fp);
     }
+    //dump_module(l->mod);
+    define_dummy(l);
+    define_qemu_ld(l);
+    define_qemu_st(l);
+    LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
+    LLVMRunPassManager(l->mpm_O2, l->mod);
     dump_module(l->mod);
     qemu_log("LLVMRunPassManager end!\n");
 
@@ -1559,6 +1559,13 @@ void tcg_llvm_context_init(TCGContext *s)
 
 void tcg_llvm_init(void)
 {
+    const char *llvm_argv[] = {
+        "qemu", /* argv[0] is program name */
+        "-dse-memoryssa-walklimit=10000",
+        //"--help-hidden",
+    };
+    LLVMParseCommandLineOptions(ARRAY_SIZE(llvm_argv), llvm_argv, "");
+
     LLVMInitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
     LLVMInitializeNativeAsmParser();
