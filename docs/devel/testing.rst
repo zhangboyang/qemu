@@ -111,7 +111,7 @@ check-block
 -----------
 
 ``make check-block`` runs a subset of the block layer iotests (the tests that
-are in the "auto" group in ``tests/qemu-iotests/group``).
+are in the "auto" group).
 See the "QEMU iotests" section below for more information.
 
 GCC gcov support
@@ -223,6 +223,54 @@ Otherwise, image locking implications have to be considered.  For example,
 another application on the host may have locked the file, possibly leading to a
 test failure.  If using such devices are explicitly desired, consider adding
 ``locking=off`` option to disable image locking.
+
+Test case groups
+----------------
+
+"Tests may belong to one or more test groups, which are defined in the form
+of a comment in the test source file. By convention, test groups are listed
+in the second line of the test file, after the "#!/..." line, like this:
+
+.. code::
+
+  #!/usr/bin/env python3
+  # group: auto quick
+  #
+  ...
+
+Another way of defining groups is creating the tests/qemu-iotests/group.local
+file. This should be used only for downstream (this file should never appear
+in upstream). This file may be used for defining some downstream test groups
+or for temporarily disabling tests, like this:
+
+.. code::
+
+  # groups for some company downstream process
+  #
+  # ci - tests to run on build
+  # down - our downstream tests, not for upstream
+  #
+  # Format of each line is:
+  # TEST_NAME TEST_GROUP [TEST_GROUP ]...
+
+  013 ci
+  210 disabled
+  215 disabled
+  our-ugly-workaround-test down ci
+
+Note that the following group names have a special meaning:
+
+- quick: Tests in this group should finish within a few seconds.
+
+- auto: Tests in this group are used during "make check" and should be
+  runnable in any case. That means they should run with every QEMU binary
+  (also non-x86), with every QEMU configuration (i.e. must not fail if
+  an optional feature is not compiled in - but reporting a "skip" is ok),
+  work at least with the qcow2 file format, work with all kind of host
+  filesystems and users (e.g. "nobody" or "root") and must not take too
+  much memory and disk space (since CI pipelines tend to fail otherwise).
+
+- disabled: Tests in this group are disabled and ignored by check.
 
 .. _docker-ref:
 
@@ -870,6 +918,68 @@ qemu_bin
 ~~~~~~~~
 
 The exact QEMU binary to be used on QEMUMachine.
+
+Skipping tests
+--------------
+The Avocado framework provides Python decorators which allow for easily skip
+tests running under certain conditions. For example, on the lack of a binary
+on the test system or when the running environment is a CI system. For further
+information about those decorators, please refer to::
+
+  https://avocado-framework.readthedocs.io/en/latest/guides/writer/chapters/writing.html#skipping-tests
+
+While the conditions for skipping tests are often specifics of each one, there
+are recurring scenarios identified by the QEMU developers and the use of
+environment variables became a kind of standard way to enable/disable tests.
+
+Here is a list of the most used variables:
+
+AVOCADO_ALLOW_LARGE_STORAGE
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Tests which are going to fetch or produce assets considered *large* are not
+going to run unless that `AVOCADO_ALLOW_LARGE_STORAGE=1` is exported on
+the environment.
+
+The definition of *large* is a bit arbitrary here, but it usually means an
+asset which occupies at least 1GB of size on disk when uncompressed.
+
+AVOCADO_ALLOW_UNTRUSTED_CODE
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+There are tests which will boot a kernel image or firmware that can be
+considered not safe to run on the developer's workstation, thus they are
+skipped by default. The definition of *not safe* is also arbitrary but
+usually it means a blob which either its source or build process aren't
+public available.
+
+You should export `AVOCADO_ALLOW_UNTRUSTED_CODE=1` on the environment in
+order to allow tests which make use of those kind of assets.
+
+AVOCADO_TIMEOUT_EXPECTED
+~~~~~~~~~~~~~~~~~~~~~~~~
+The Avocado framework has a timeout mechanism which interrupts tests to avoid the
+test suite of getting stuck. The timeout value can be set via test parameter or
+property defined in the test class, for further details::
+
+  https://avocado-framework.readthedocs.io/en/latest/guides/writer/chapters/writing.html#setting-a-test-timeout
+
+Even though the timeout can be set by the test developer, there are some tests
+that may not have a well-defined limit of time to finish under certain
+conditions. For example, tests that take longer to execute when QEMU is
+compiled with debug flags. Therefore, the `AVOCADO_TIMEOUT_EXPECTED` variable
+has been used to determine whether those tests should run or not.
+
+GITLAB_CI
+~~~~~~~~~
+A number of tests are flagged to not run on the GitLab CI. Usually because
+they proved to the flaky or there are constraints on the CI environment which
+would make them fail. If you encounter a similar situation then use that
+variable as shown on the code snippet below to skip the test:
+
+.. code::
+
+  @skipIf(os.getenv('GITLAB_CI'), 'Running on GitLab')
+  def test(self):
+      do_something()
 
 Uninstalling Avocado
 --------------------

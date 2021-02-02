@@ -41,9 +41,13 @@
 #include "exec/cpu-all.h"
 #include "sysemu/cpu-timers.h"
 #include "sysemu/replay.h"
+<<<<<<< HEAD
 #include "tcg/tcg-llvm.h"
 
 #include <sys/syscall.h>
+=======
+#include "internal.h"
+>>>>>>> 74208cd252c5da9d867270a178799abd802b9338
 
 /* -icount align implementation. */
 
@@ -196,6 +200,7 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
         //printf("tcg exec done!\n");
     }
 #else
+    qemu_thread_jit_execute();
     ret = tcg_qemu_tb_exec(env, tb_ptr);
 #endif
 
@@ -298,6 +303,9 @@ void cpu_exec_step_atomic(CPUState *cpu)
 
     if (sigsetjmp(cpu->jmp_env, 0) == 0) {
         start_exclusive();
+        g_assert(cpu == current_cpu);
+        g_assert(!cpu->running);
+        cpu->running = true;
 
         tb = tb_lookup__cpu_state(cpu, &pc, &cs_base, &flags, cf_mask);
         if (tb == NULL) {
@@ -336,6 +344,7 @@ void cpu_exec_step_atomic(CPUState *cpu)
      */
     g_assert(cpu_in_exclusive_context(cpu));
     parallel_cpus = true;
+    cpu->running = false;
     end_exclusive();
 }
 
@@ -418,6 +427,7 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
 {
     uintptr_t old;
 
+    qemu_thread_jit_write();
     assert(n < ARRAY_SIZE(tb->jmp_list_next));
     qemu_spin_lock(&tb_next->jmp_lock);
 
