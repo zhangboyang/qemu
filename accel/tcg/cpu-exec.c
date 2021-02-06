@@ -41,13 +41,10 @@
 #include "exec/cpu-all.h"
 #include "sysemu/cpu-timers.h"
 #include "sysemu/replay.h"
-<<<<<<< HEAD
 #include "tcg/tcg-llvm.h"
 
 #include <sys/syscall.h>
-=======
 #include "internal.h"
->>>>>>> 74208cd252c5da9d867270a178799abd802b9338
 
 /* -icount align implementation. */
 
