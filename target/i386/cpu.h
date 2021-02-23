@@ -368,6 +368,7 @@ typedef enum X86Seg {
 
 #define MSR_IA32_SMBASE                 0x9e
 #define MSR_SMI_COUNT                   0x34
+#define MSR_CORE_THREAD_COUNT           0x35
 #define MSR_MTRRcap                     0xfe
 #define MSR_MTRRcap_VCNT                8
 #define MSR_MTRRcap_FIXRANGE_SUPPORT    (1 << 8)
@@ -816,8 +817,12 @@ typedef uint64_t FeatureWordArray[FEATURE_WORDS];
 #define CPUID_8000_0008_EBX_WBNOINVD    (1U << 9)
 /* Indirect Branch Prediction Barrier */
 #define CPUID_8000_0008_EBX_IBPB        (1U << 12)
+/* Indirect Branch Restricted Speculation */
+#define CPUID_8000_0008_EBX_IBRS        (1U << 14)
 /* Single Thread Indirect Branch Predictors */
 #define CPUID_8000_0008_EBX_STIBP       (1U << 15)
+/* Speculative Store Bypass Disable */
+#define CPUID_8000_0008_EBX_AMD_SSBD    (1U << 24)
 
 #define CPUID_XSAVE_XSAVEOPT   (1U << 0)
 #define CPUID_XSAVE_XSAVEC     (1U << 1)
