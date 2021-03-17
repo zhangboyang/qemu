@@ -21,15 +21,6 @@ deprecated.
 System emulator command line arguments
 --------------------------------------
 
-``-usbdevice`` (since 2.10.0)
-'''''''''''''''''''''''''''''
-
-The ``-usbdevice DEV`` argument is now a synonym for setting
-the ``-device usb-DEV`` argument instead. The deprecated syntax
-would automatically enable USB support on the machine type.
-If using the new syntax, USB support must be explicitly
-enabled via the ``-machine usb=on`` argument.
-
 ``-drive file=json:{...{'driver':'file'}}`` (since 3.0)
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
@@ -134,6 +125,12 @@ Boolean options such as ``share=on``/``share=off`` could be written
 in short form as ``share`` and ``noshare``.  This is now deprecated
 and will cause a warning.
 
+``delay`` option for socket character devices (since 6.0)
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+The replacement for the ``nodelay`` short-form boolean option is ``nodelay=on``
+rather than ``delay=off``.
+
 ``--enable-fips`` (since 6.0)
 '''''''''''''''''''''''''''''
 
@@ -152,6 +149,21 @@ supported on FIPS enabled hosts.
 The ``-writeconfig`` option is not able to serialize the entire contents
 of the QEMU command line.  It is thus considered a failed experiment
 and deprecated, with no current replacement.
+
+Userspace local APIC with KVM (x86, since 6.0)
+''''''''''''''''''''''''''''''''''''''''''''''
+
+Using ``-M kernel-irqchip=off`` with x86 machine types that include a local
+APIC is deprecated.  The ``split`` setting is supported, as is using
+``-M kernel-irqchip=off`` with the ISA PC machine type.
+
+hexadecimal sizes with scaling multipliers (since 6.0)
+''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+Input parameters that take a size value should only use a size suffix
+(such as 'k' or 'M') when the base is written in decimal, and not when
+the value is hexadecimal.  That is, '0x20M' is deprecated, and should
+be written either as '32M' or as '0x2000000'.
 
 QEMU Machine Protocol (QMP) commands
 ------------------------------------
@@ -388,14 +400,6 @@ it out of sheepdog volumes into an alternative storage backend.
 
 linux-user mode CPUs
 --------------------
-
-``tilegx`` CPUs (since 5.1.0)
-'''''''''''''''''''''''''''''
-
-The ``tilegx`` guest CPU support (which was only implemented in
-linux-user mode) is deprecated and will be removed in a future version
-of QEMU. Support for this CPU was removed from the upstream Linux
-kernel in 2018, and has also been dropped from glibc.
 
 ``ppc64abi32`` CPUs (since 5.2.0)
 '''''''''''''''''''''''''''''''''

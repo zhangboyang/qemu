@@ -29,7 +29,6 @@
 #include "sysemu/cpu-timers.h"
 #include "sysemu/replay.h"
 #include "sysemu/cpus.h"
-#include "sysemu/qtest.h"
 
 #ifdef CONFIG_POSIX
 #include <pthread.h>
@@ -241,6 +240,19 @@ int64_t timerlist_deadline_ns(QEMUTimerList *timer_list)
     }
 
     return delta;
+}
+
+/*
+ * Returns the time remaining for the deadline, in ms.
+ */
+int64_t timer_deadline_ms(QEMUTimer *timer)
+{
+    if (timer_pending(timer)) {
+        return qemu_timeout_ns_to_ms(timer->expire_time) -
+               qemu_clock_get_ms(timer->timer_list->clock->type);
+    }
+
+    return 0;
 }
 
 /* Calculate the soonest deadline across all timerlists attached

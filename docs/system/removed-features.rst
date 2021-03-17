@@ -26,8 +26,8 @@ The ``-no-kvm`` argument was a synonym for setting ``-machine accel=tcg``.
 The ``-realtime mlock=on|off`` argument has been replaced by the
 ``-overcommit mem-lock=on|off`` argument.
 
-``-show-cursor`` option (since 5.0)
-'''''''''''''''''''''''''''''''''''
+``-show-cursor`` option (removed in 6.0)
+''''''''''''''''''''''''''''''''''''''''
 
 Use ``-display sdl,show-cursor=on``, ``-display gtk,show-cursor=on``
 or ``-display default,show-cursor=on`` instead.
@@ -37,6 +37,14 @@ or ``-display default,show-cursor=on`` instead.
 
 QEMU 5.0 introduced an alternative syntax to specify the size of the translation
 block cache, ``-accel tcg,tb-size=``.
+
+``-usbdevice audio`` (removed in 6.0)
+'''''''''''''''''''''''''''''''''''''
+
+This option lacked the possibility to specify an audio backend device.
+Use ``-device usb-audio`` now instead (and specify a corresponding USB
+host controller or ``-usb`` if necessary).
+
 
 QEMU Machine Protocol (QMP) commands
 ------------------------------------
@@ -141,6 +149,20 @@ This machine has been renamed ``fuloong2e``.
 
 These machine types were very old and likely could not be used for live
 migration from old QEMU versions anymore. Use a newer machine type instead.
+
+
+linux-user mode CPUs
+--------------------
+
+``tilegx`` CPUs (removed in 6.0)
+''''''''''''''''''''''''''''''''
+
+The ``tilegx`` guest CPU support has been removed without replacement. It was
+only implemented in linux-user mode, but support for this CPU was removed from
+the upstream Linux kernel in 2018, and it has also been dropped from glibc, so
+there is no new Linux development taking place with this architecture. For
+running the old binaries, you can use older versions of QEMU.
+
 
 Related binaries
 ----------------

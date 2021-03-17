@@ -6481,6 +6481,16 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         /* Grab a mutex so that thread setup appears atomic.  */
         pthread_mutex_lock(&clone_lock);
 
+        /*
+         * If this is our first additional thread, we need to ensure we
+         * generate code for parallel execution and flush old translations.
+         * Do this now so that the copy gets CF_PARALLEL too.
+         */
+        if (!(cpu->tcg_cflags & CF_PARALLEL)) {
+            cpu->tcg_cflags |= CF_PARALLEL;
+            tb_flush(cpu);
+        }
+
         /* we create a new CPU instance. */
         new_env = cpu_copy(env);
         /* Init regs that differ from the parent.  */
@@ -6520,14 +6530,6 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         sigfillset(&sigmask);
         sigprocmask(SIG_BLOCK, &sigmask, &info.sigmask);
         cpu->random_seed = qemu_guest_random_seed_thread_part1();
-
-        /* If this is our first additional thread, we need to ensure we
-         * generate code for parallel execution and flush old translations.
-         */
-        if (!parallel_cpus) {
-            parallel_cpus = true;
-            tb_flush(cpu);
-        }
 
         ret = pthread_create(&info.thread, &attr, clone_func, &info);
         /* TODO: Free new CPU state if thread creation failed.  */
@@ -7888,9 +7890,9 @@ static int open_self_maps(void *cpu_env, int fd)
             count = dprintf(fd, TARGET_ABI_FMT_ptr "-" TARGET_ABI_FMT_ptr
                             " %c%c%c%c %08" PRIx64 " %s %"PRId64,
                             h2g(min), h2g(max - 1) + 1,
-                            e->is_read ? 'r' : '-',
-                            e->is_write ? 'w' : '-',
-                            e->is_exec ? 'x' : '-',
+                            (flags & PAGE_READ) ? 'r' : '-',
+                            (flags & PAGE_WRITE_ORG) ? 'w' : '-',
+                            (flags & PAGE_EXEC) ? 'x' : '-',
                             e->is_priv ? 'p' : '-',
                             (uint64_t) e->offset, e->dev, e->inode);
             if (path) {

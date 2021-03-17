@@ -1440,7 +1440,7 @@ static void bdrv_assign_node_name(BlockDriverState *bs,
          * Check for empty string or invalid characters, but not if it is
          * generated (generated names use characters not available to the user)
          */
-        error_setg(errp, "Invalid node name");
+        error_setg(errp, "Invalid node-name: '%s'", node_name);
         return;
     }
 
@@ -1453,7 +1453,7 @@ static void bdrv_assign_node_name(BlockDriverState *bs,
 
     /* takes care of avoiding duplicates node names */
     if (bdrv_find_node(node_name)) {
-        error_setg(errp, "Duplicate node name");
+        error_setg(errp, "Duplicate nodes with node-name='%s'", node_name);
         goto out;
     }
 
@@ -2995,11 +2995,9 @@ int bdrv_open_backing_file(BlockDriverState *bs, QDict *parent_options,
 
     /* Hook up the backing file link; drop our reference, bs owns the
      * backing_hd reference now */
-    bdrv_set_backing_hd(bs, backing_hd, &local_err);
+    ret = bdrv_set_backing_hd(bs, backing_hd, errp);
     bdrv_unref(backing_hd);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        ret = -EINVAL;
+    if (ret < 0) {
         goto free_exit;
     }
 
@@ -5432,7 +5430,7 @@ BlockDriverState *bdrv_lookup_bs(const char *device,
         }
     }
 
-    error_setg(errp, "Cannot find device=%s nor node_name=%s",
+    error_setg(errp, "Cannot find device=\'%s\' nor node-name=\'%s\'",
                      device ? device : "",
                      node_name ? node_name : "");
     return NULL;
@@ -6752,7 +6750,7 @@ BlockDriverState *check_to_replace_node(BlockDriverState *parent_bs,
     AioContext *aio_context;
 
     if (!to_replace_bs) {
-        error_setg(errp, "Node name '%s' not found", node_name);
+        error_setg(errp, "Failed to find node with node-name='%s'", node_name);
         return NULL;
     }
 

@@ -77,7 +77,6 @@ typedef struct SCSIDiskReq {
     struct iovec iov;
     QEMUIOVector qiov;
     BlockAcctCookie acct;
-    unsigned char *status;
 } SCSIDiskReq;
 
 #define SCSI_DISK_F_REMOVABLE             0
@@ -261,8 +260,6 @@ static bool scsi_disk_req_check_error(SCSIDiskReq *r, int ret, bool acct_failed)
 
     if (ret < 0) {
         return scsi_handle_rw_error(r, ret, acct_failed);
-    } else if (r->status && *r->status) {
-        return scsi_handle_rw_error(r, *r->status, acct_failed);
     }
 
     return false;
@@ -2568,6 +2565,7 @@ static void scsi_disk_new_request_dump(uint32_t lun, uint32_t tag, uint8_t *buf)
     int len = scsi_cdb_length(buf);
     char *line_buffer, *p;
 
+    assert(len > 0 && len <= 16);
     line_buffer = g_malloc(len * 5 + 1);
 
     for (i = 0, p = line_buffer; i < len; i++) {
@@ -2697,7 +2695,46 @@ typedef struct SCSIBlockReq {
 
     /* CDB passed to SG_IO.  */
     uint8_t cdb[16];
+    BlockCompletionFunc *cb;
+    void *cb_opaque;
 } SCSIBlockReq;
+
+static void scsi_block_sgio_complete(void *opaque, int ret)
+{
+    SCSIBlockReq *req = (SCSIBlockReq *)opaque;
+    SCSIDiskReq *r = &req->req;
+    SCSIDevice *s = r->req.dev;
+    sg_io_hdr_t *io_hdr = &req->io_header;
+
+    if (ret == 0) {
+        if (io_hdr->host_status != SCSI_HOST_OK) {
+            scsi_req_complete_failed(&r->req, io_hdr->host_status);
+            scsi_req_unref(&r->req);
+            return;
+        }
+
+        if (io_hdr->driver_status & SG_ERR_DRIVER_TIMEOUT) {
+            ret = BUSY;
+        } else {
+            ret = io_hdr->status;
+        }
+
+        if (ret > 0) {
+            aio_context_acquire(blk_get_aio_context(s->conf.blk));
+            if (scsi_handle_rw_error(r, ret, true)) {
+                aio_context_release(blk_get_aio_context(s->conf.blk));
+                scsi_req_unref(&r->req);
+                return;
+            }
+            aio_context_release(blk_get_aio_context(s->conf.blk));
+
+            /* Ignore error.  */
+            ret = 0;
+        }
+    }
+
+    req->cb(req->cb_opaque, ret);
+}
 
 static BlockAIOCB *scsi_block_do_sgio(SCSIBlockReq *req,
                                       int64_t offset, QEMUIOVector *iov,
@@ -2777,9 +2814,11 @@ static BlockAIOCB *scsi_block_do_sgio(SCSIBlockReq *req,
     io_header->timeout = s->qdev.io_timeout * 1000;
     io_header->usr_ptr = r;
     io_header->flags |= SG_FLAG_DIRECT_IO;
+    req->cb = cb;
+    req->cb_opaque = opaque;
     trace_scsi_disk_aio_sgio_command(r->req.tag, req->cdb[0], lba,
                                      nb_logical_blocks, io_header->timeout);
-    aiocb = blk_aio_ioctl(s->qdev.conf.blk, SG_IO, io_header, cb, opaque);
+    aiocb = blk_aio_ioctl(s->qdev.conf.blk, SG_IO, io_header, scsi_block_sgio_complete, req);
     assert(aiocb != NULL);
     return aiocb;
 }
@@ -2893,7 +2932,6 @@ static int32_t scsi_block_dma_command(SCSIRequest *req, uint8_t *buf)
         return 0;
     }
 
-    r->req.status = &r->io_header.status;
     return scsi_disk_dma_command(req, buf);
 }
 

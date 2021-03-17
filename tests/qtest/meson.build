@@ -4,6 +4,19 @@ if not config_host.has_key('CONFIG_POSIX')
   subdir_done()
 endif
 
+slow_qtests = {
+  'ahci-test' : 60,
+  'bios-tables-test' : 120,
+  'boot-serial-test' : 60,
+  'migration-test' : 150,
+  'npcm7xx_pwm-test': 150,
+  'prom-env-test' : 60,
+  'pxe-test' : 60,
+  'qos-test' : 60,
+  'qom-test' : 300,
+  'test-hmp' : 120,
+}
+
 qtests_generic = [
   'cdrom-test',
   'device-introspect-test',
@@ -16,6 +29,9 @@ qtests_generic = [
 ]
 if config_host.has_key('CONFIG_MODULES')
   qtests_generic += [ 'modules-test' ]
+endif
+if slirp.found()
+  qtests_generic += [ 'test-query-netdev' ]
 endif
 
 qtests_pci = \
@@ -141,8 +157,10 @@ qtests_npcm7xx = \
    'npcm7xx_rng-test',
    'npcm7xx_smbus-test',
    'npcm7xx_timer-test',
-   'npcm7xx_watchdog_timer-test']
+   'npcm7xx_watchdog_timer-test'] + \
+   (slirp.found() ? ['npcm7xx_emc-test'] : [])
 qtests_arm = \
+  (config_all_devices.has_key('CONFIG_MPS2') ? ['sse-timer-test'] : []) + \
   (config_all_devices.has_key('CONFIG_CMSDK_APB_DUALTIMER') ? ['cmsdk-apb-dualtimer-test'] : []) + \
   (config_all_devices.has_key('CONFIG_CMSDK_APB_TIMER') ? ['cmsdk-apb-timer-test'] : []) + \
   (config_all_devices.has_key('CONFIG_CMSDK_APB_WATCHDOG') ? ['cmsdk-apb-watchdog-test'] : []) + \
@@ -273,6 +291,8 @@ foreach dir : target_dirs
          env: qtest_env,
          args: ['--tap', '-k'],
          protocol: 'tap',
+         timeout: slow_qtests.get(test, 30),
+         priority: slow_qtests.get(test, 30),
          suite: ['qtest', 'qtest-' + target_base])
   endforeach
 endforeach
