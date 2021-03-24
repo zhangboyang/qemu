@@ -1,4 +1,5 @@
 #include "qemu/osdep.h"
+#include "qapi/compat-policy.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qjson.h"
 #include "qapi/qmp/qnum.h"
@@ -12,14 +13,7 @@
 
 static QmpCommandList qmp_commands;
 
-#if defined(TEST_IF_STRUCT) && defined(TEST_IF_CMD)
-UserDefThree *qmp_TestIfCmd(TestIfStruct *foo, Error **errp)
-{
-    return NULL;
-}
-#endif
-
-UserDefThree *qmp_TestCmdReturnDefThree(Error **errp)
+UserDefThree *qmp_test_cmd_return_def_three(Error **errp)
 {
     return NULL;
 }
@@ -49,12 +43,17 @@ void qmp_user_def_cmd1(UserDefOne * ud1, Error **errp)
 {
 }
 
-void qmp_test_features0(FeatureStruct0 *fs0, FeatureStruct1 *fs1,
-                       FeatureStruct2 *fs2, FeatureStruct3 *fs3,
-                       FeatureStruct4 *fs4, CondFeatureStruct1 *cfs1,
-                       CondFeatureStruct2 *cfs2, CondFeatureStruct3 *cfs3,
-                       Error **errp)
+FeatureStruct1 *qmp_test_features0(bool has_fs0, FeatureStruct0 *fs0,
+                                   bool has_fs1, FeatureStruct1 *fs1,
+                                   bool has_fs2, FeatureStruct2 *fs2,
+                                   bool has_fs3, FeatureStruct3 *fs3,
+                                   bool has_fs4, FeatureStruct4 *fs4,
+                                   bool has_cfs1, CondFeatureStruct1 *cfs1,
+                                   bool has_cfs2, CondFeatureStruct2 *cfs2,
+                                   bool has_cfs3, CondFeatureStruct3 *cfs3,
+                                   Error **errp)
 {
+    return g_new0(FeatureStruct1, 1);
 }
 
 void qmp_test_command_features1(Error **errp)
@@ -200,7 +199,7 @@ static void test_dispatch_cmd(void)
 
     ret = qobject_to(QDict,
                      do_qmp_dispatch(false,
-                                     "{ 'execute': 'user_def_cmd' }"));
+                                     "{ 'execute': 'user-def-cmd' }"));
     assert(ret && qdict_size(ret) == 0);
     qobject_unref(ret);
 }
@@ -221,11 +220,11 @@ static void test_dispatch_cmd_failure(void)
 {
     /* missing arguments */
     do_qmp_dispatch_error(false, ERROR_CLASS_GENERIC_ERROR,
-                          "{ 'execute': 'user_def_cmd2' }");
+                          "{ 'execute': 'user-def-cmd2' }");
 
     /* extra arguments */
     do_qmp_dispatch_error(false, ERROR_CLASS_GENERIC_ERROR,
-                          "{ 'execute': 'user_def_cmd',"
+                          "{ 'execute': 'user-def-cmd',"
                           " 'arguments': { 'a': 66 } }");
 }
 
@@ -249,7 +248,7 @@ static void test_dispatch_cmd_io(void)
     int64_t val;
 
     ret = qobject_to(QDict, do_qmp_dispatch(false,
-        "{ 'execute': 'user_def_cmd2', 'arguments': {"
+        "{ 'execute': 'user-def-cmd2', 'arguments': {"
         " 'ud1a': { 'integer': 42, 'string': 'hello' },"
         " 'ud1b': { 'integer': 422, 'string': 'hello2' } } }"));
 
@@ -273,6 +272,75 @@ static void test_dispatch_cmd_io(void)
     g_assert(qnum_get_try_int(ret3, &val));
     g_assert_cmpint(val, ==, 66);
     qobject_unref(ret3);
+}
+
+static void test_dispatch_cmd_deprecated(void)
+{
+    const char *cmd = "{ 'execute': 'test-command-features1' }";
+    QDict *ret;
+
+    memset(&compat_policy, 0, sizeof(compat_policy));
+
+    /* accept */
+    ret = qobject_to(QDict, do_qmp_dispatch(false, cmd));
+    assert(ret && qdict_size(ret) == 0);
+    qobject_unref(ret);
+
+    compat_policy.has_deprecated_input = true;
+    compat_policy.deprecated_input = COMPAT_POLICY_INPUT_ACCEPT;
+    ret = qobject_to(QDict, do_qmp_dispatch(false, cmd));
+    assert(ret && qdict_size(ret) == 0);
+    qobject_unref(ret);
+
+    compat_policy.deprecated_input = COMPAT_POLICY_INPUT_REJECT;
+    do_qmp_dispatch_error(false, ERROR_CLASS_COMMAND_NOT_FOUND, cmd);
+}
+
+static void test_dispatch_cmd_arg_deprecated(void)
+{
+    const char *cmd = "{ 'execute': 'test-features0',"
+        " 'arguments': { 'fs1': { 'foo': 42 } } }";
+    QDict *ret;
+
+    memset(&compat_policy, 0, sizeof(compat_policy));
+
+    /* accept */
+    ret = qobject_to(QDict, do_qmp_dispatch(false, cmd));
+    assert(ret && qdict_size(ret) == 1);
+    qobject_unref(ret);
+
+    compat_policy.has_deprecated_input = true;
+    compat_policy.deprecated_input = COMPAT_POLICY_INPUT_ACCEPT;
+    ret = qobject_to(QDict, do_qmp_dispatch(false, cmd));
+    assert(ret && qdict_size(ret) == 1);
+    qobject_unref(ret);
+
+    compat_policy.deprecated_input = COMPAT_POLICY_INPUT_REJECT;
+    do_qmp_dispatch_error(false, ERROR_CLASS_GENERIC_ERROR, cmd);
+}
+
+static void test_dispatch_cmd_ret_deprecated(void)
+{
+    const char *cmd = "{ 'execute': 'test-features0' }";
+    QDict *ret;
+
+    memset(&compat_policy, 0, sizeof(compat_policy));
+
+    /* default accept */
+    ret = qobject_to(QDict, do_qmp_dispatch(false, cmd));
+    assert(ret && qdict_size(ret) == 1);
+    qobject_unref(ret);
+
+    compat_policy.has_deprecated_output = true;
+    compat_policy.deprecated_output = COMPAT_POLICY_OUTPUT_ACCEPT;
+    ret = qobject_to(QDict, do_qmp_dispatch(false, cmd));
+    assert(ret && qdict_size(ret) == 1);
+    qobject_unref(ret);
+
+    compat_policy.deprecated_output = COMPAT_POLICY_OUTPUT_HIDE;
+    ret = qobject_to(QDict, do_qmp_dispatch(false, cmd));
+    assert(ret && qdict_size(ret) == 0);
+    qobject_unref(ret);
 }
 
 /* test generated dealloc functions for generated types */
@@ -349,6 +417,12 @@ int main(int argc, char **argv)
     g_test_add_func("/qmp/dispatch_cmd_io", test_dispatch_cmd_io);
     g_test_add_func("/qmp/dispatch_cmd_success_response",
                     test_dispatch_cmd_success_response);
+    g_test_add_func("/qmp/dispatch_cmd_deprecated",
+                    test_dispatch_cmd_deprecated);
+    g_test_add_func("/qmp/dispatch_cmd_arg_deprecated",
+                    test_dispatch_cmd_arg_deprecated);
+    g_test_add_func("/qmp/dispatch_cmd_ret_deprecated",
+                    test_dispatch_cmd_ret_deprecated);
     g_test_add_func("/qmp/dealloc_types", test_dealloc_types);
     g_test_add_func("/qmp/dealloc_partial", test_dealloc_partial);
 
