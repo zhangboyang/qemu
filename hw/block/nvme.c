@@ -91,20 +91,15 @@
  *   the minimum memory page size (CAP.MPSMIN). The default value is 0 (i.e.
  *   defaulting to the value of `mdts`).
  *
- * - `zoned.append_size_limit`
- *   The maximum I/O size in bytes that is allowed in Zone Append command.
- *   The default is 128KiB. Since internally this this value is maintained as
- *   ZASL = log2(<maximum append size> / <page size>), some values assigned
- *   to this property may be rounded down and result in a lower maximum ZA
- *   data size being in effect. By setting this property to 0, users can make
- *   ZASL to be equal to MDTS. This property only affects zoned namespaces.
- *
  * nvme namespace device parameters
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- * - `subsys`
- *   If given, the namespace will be attached to all controllers in the
- *   subsystem. Otherwise, `bus` must be given to attach this namespace to a
- *   specific controller as a non-shared namespace.
+ * - `shared`
+ *   When the parent nvme device (as defined explicitly by the 'bus' parameter
+ *   or implicitly by the most recently defined NvmeBus) is linked to an
+ *   nvme-subsys device, the namespace will be attached to all controllers in
+ *   the subsystem. If set to 'off' (the default), the namespace will remain a
+ *   private namespace and may only be attached to a single controller at a
+ *   time.
  *
  * - `detached`
  *   This parameter is only valid together with the `subsys` parameter. If left
@@ -4250,7 +4245,7 @@ static uint16_t nvme_identify_ns_attached_list(NvmeCtrl *n, NvmeRequest *req)
             continue;
         }
 
-        if (!nvme_ns_is_attached(ctrl, ns)) {
+        if (!nvme_ns(ctrl, c->nsid)) {
             continue;
         }
 
@@ -4876,6 +4871,21 @@ static uint16_t nvme_aer(NvmeCtrl *n, NvmeRequest *req)
     return NVME_NO_COMPLETE;
 }
 
+static void nvme_update_dmrsl(NvmeCtrl *n)
+{
+    int nsid;
+
+    for (nsid = 1; nsid <= NVME_MAX_NAMESPACES; nsid++) {
+        NvmeNamespace *ns = nvme_ns(n, nsid);
+        if (!ns) {
+            continue;
+        }
+
+        n->dmrsl = MIN_NON_ZERO(n->dmrsl,
+                                BDRV_REQUEST_MAX_BYTES / nvme_l2b(ns, 1));
+    }
+}
+
 static void __nvme_select_ns_iocs(NvmeCtrl *n, NvmeNamespace *ns);
 static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
 {
@@ -4892,6 +4902,10 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
 
     trace_pci_nvme_ns_attachment(nvme_cid(req), dw10 & 0xf);
 
+    if (!nvme_nsid_valid(n, nsid)) {
+        return NVME_INVALID_NSID | NVME_DNR;
+    }
+
     ns = nvme_subsys_ns(n->subsys, nsid);
     if (!ns) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -4906,6 +4920,7 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
         return NVME_NS_CTRL_LIST_INVALID | NVME_DNR;
     }
 
+    *nr_ids = MIN(*nr_ids, NVME_CONTROLLER_LIST_SIZE - 1);
     for (i = 0; i < *nr_ids; i++) {
         ctrl = nvme_subsys_ctrl(n->subsys, ids[i]);
         if (!ctrl) {
@@ -4913,18 +4928,25 @@ static uint16_t nvme_ns_attachment(NvmeCtrl *n, NvmeRequest *req)
         }
 
         if (attach) {
-            if (nvme_ns_is_attached(ctrl, ns)) {
+            if (nvme_ns(ctrl, nsid)) {
                 return NVME_NS_ALREADY_ATTACHED | NVME_DNR;
             }
 
-            nvme_ns_attach(ctrl, ns);
+            if (ns->attached && !ns->params.shared) {
+                return NVME_NS_PRIVATE | NVME_DNR;
+            }
+
+            nvme_attach_ns(ctrl, ns);
             __nvme_select_ns_iocs(ctrl, ns);
         } else {
-            if (!nvme_ns_is_attached(ctrl, ns)) {
+            if (!nvme_ns(ctrl, nsid)) {
                 return NVME_NS_NOT_ATTACHED | NVME_DNR;
             }
 
-            nvme_ns_detach(ctrl, ns);
+            ctrl->namespaces[nsid - 1] = NULL;
+            ns->attached--;
+
+            nvme_update_dmrsl(ctrl);
         }
 
         /*
@@ -5009,9 +5031,15 @@ static uint16_t nvme_format_ns(NvmeCtrl *n, NvmeNamespace *ns, uint8_t lbaf,
 
     }
 
-    (*count)--;
+    if (--(*count)) {
+        return NVME_NO_COMPLETE;
+    }
 
-    return NVME_NO_COMPLETE;
+    g_free(count);
+    ns->status = 0x0;
+    (*num_formats)--;
+
+    return NVME_SUCCESS;
 }
 
 static uint16_t nvme_format(NvmeCtrl *n, NvmeRequest *req)
@@ -5807,9 +5835,10 @@ static void nvme_check_constraints(NvmeCtrl *n, Error **errp)
         params->max_ioqpairs = params->num_queues - 1;
     }
 
-    if (n->conf.blk) {
-        warn_report("drive property is deprecated; "
-                    "please use an nvme-ns device instead");
+    if (n->namespace.blkconf.blk && n->subsys) {
+        error_setg(errp, "subsystem support is unavailable with legacy "
+                   "namespace ('drive' property)");
+        return;
     }
 
     if (params->max_ioqpairs < 1 ||
@@ -5870,75 +5899,6 @@ static void nvme_init_state(NvmeCtrl *n)
     n->features.temp_thresh_hi = NVME_TEMPERATURE_WARNING;
     n->starttime_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     n->aer_reqs = g_new0(NvmeRequest *, n->params.aerl + 1);
-}
-
-static int nvme_attach_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
-{
-    if (nvme_ns_is_attached(n, ns)) {
-        error_setg(errp,
-                   "namespace %d is already attached to controller %d",
-                   nvme_nsid(ns), n->cntlid);
-        return -1;
-    }
-
-    nvme_ns_attach(n, ns);
-
-    return 0;
-}
-
-int nvme_register_namespace(NvmeCtrl *n, NvmeNamespace *ns, Error **errp)
-{
-    uint32_t nsid = nvme_nsid(ns);
-
-    if (nsid > NVME_MAX_NAMESPACES) {
-        error_setg(errp, "invalid namespace id (must be between 0 and %d)",
-                   NVME_MAX_NAMESPACES);
-        return -1;
-    }
-
-    if (!nsid) {
-        for (int i = 1; i <= n->num_namespaces; i++) {
-            if (!nvme_ns(n, i)) {
-                nsid = ns->params.nsid = i;
-                break;
-            }
-        }
-
-        if (!nsid) {
-            error_setg(errp, "no free namespace id");
-            return -1;
-        }
-    } else {
-        if (n->namespaces[nsid - 1]) {
-            error_setg(errp, "namespace id '%d' is already in use", nsid);
-            return -1;
-        }
-    }
-
-    trace_pci_nvme_register_namespace(nsid);
-
-    /*
-     * If subsys is not given, namespae is always attached to the controller
-     * because there's no subsystem to manage namespace allocation.
-     */
-    if (!n->subsys) {
-        if (ns->params.detached) {
-            error_setg(errp,
-                       "detached needs nvme-subsys specified nvme or nvme-ns");
-            return -1;
-        }
-
-        return nvme_attach_namespace(n, ns, errp);
-    } else {
-        if (!ns->params.detached) {
-            return nvme_attach_namespace(n, ns, errp);
-        }
-    }
-
-    n->dmrsl = MIN_NON_ZERO(n->dmrsl,
-                            BDRV_REQUEST_MAX_BYTES / nvme_l2b(ns, 1));
-
-    return 0;
 }
 
 static void nvme_init_cmb(NvmeCtrl *n, PCIDevice *pci_dev)
@@ -6170,6 +6130,18 @@ static int nvme_init_subsys(NvmeCtrl *n, Error **errp)
     return 0;
 }
 
+void nvme_attach_ns(NvmeCtrl *n, NvmeNamespace *ns)
+{
+    uint32_t nsid = ns->params.nsid;
+    assert(nsid && nsid <= NVME_MAX_NAMESPACES);
+
+    n->namespaces[nsid - 1] = ns;
+    ns->attached++;
+
+    n->dmrsl = MIN_NON_ZERO(n->dmrsl,
+                            BDRV_REQUEST_MAX_BYTES / nvme_l2b(ns, 1));
+}
+
 static void nvme_realize(PCIDevice *pci_dev, Error **errp)
 {
     NvmeCtrl *n = NVME(pci_dev);
@@ -6201,13 +6173,11 @@ static void nvme_realize(PCIDevice *pci_dev, Error **errp)
         ns = &n->namespace;
         ns->params.nsid = 1;
 
-        if (nvme_ns_setup(ns, errp)) {
+        if (nvme_ns_setup(n, ns, errp)) {
             return;
         }
 
-        if (nvme_register_namespace(n, ns, errp)) {
-            return;
-        }
+        nvme_attach_ns(n, ns);
     }
 }
 
@@ -6330,11 +6300,9 @@ static void nvme_instance_init(Object *obj)
 {
     NvmeCtrl *n = NVME(obj);
 
-    if (n->namespace.blkconf.blk) {
-        device_add_bootindex_property(obj, &n->namespace.blkconf.bootindex,
-                                      "bootindex", "/namespace@1,0",
-                                      DEVICE(obj));
-    }
+    device_add_bootindex_property(obj, &n->namespace.blkconf.bootindex,
+                                  "bootindex", "/namespace@1,0",
+                                  DEVICE(obj));
 
     object_property_add(obj, "smart_critical_warning", "uint8",
                         nvme_get_smart_warning,

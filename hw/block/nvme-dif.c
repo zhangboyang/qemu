@@ -1,3 +1,13 @@
+/*
+ * QEMU NVM Express End-to-End Data Protection support
+ *
+ * Copyright (c) 2021 Samsung Electronics Co., Ltd.
+ *
+ * Authors:
+ *   Klaus Jensen           <k.jensen@samsung.com>
+ *   Gollu Appalanaidu      <anaidu.gollu@samsung.com>
+ */
+
 #include "qemu/osdep.h"
 #include "hw/block/block.h"
 #include "sysemu/dma.h"
@@ -432,7 +442,7 @@ uint16_t nvme_dif_rw(NvmeCtrl *n, NvmeRequest *req)
 
     status = nvme_map_dptr(n, &req->sg, mapped_len, &req->cmd);
     if (status) {
-        return status;
+        goto err;
     }
 
     ctx->data.bounce = g_malloc(len);
