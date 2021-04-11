@@ -92,13 +92,16 @@ static void deserialize_temp(const guint8 **temp_buf, TCGLLVMTemp *t)
     }
 }
 
-static bool carg_is_label[NB_OPS][MAX_OPC_PARAM] = {
-    [INDEX_op_set_label][0] = true,
-    [INDEX_op_br][0] = true,
-    [INDEX_op_brcond_i32][1] = true,
-    [INDEX_op_brcond_i64][1] = true,
-    [INDEX_op_brcond2_i32][1] = true,
-};
+#define carg_is_label(opc, carg) ({ \
+    static const bool lookup_table[NB_OPS][MAX_OPC_PARAM] = { \
+        [INDEX_op_set_label][0] = true, \
+        [INDEX_op_br][0] = true, \
+        [INDEX_op_brcond_i32][1] = true, \
+        [INDEX_op_brcond_i64][1] = true, \
+        [INDEX_op_brcond2_i32][1] = true, \
+    }; \
+    lookup_table[opc][carg]; \
+})
 #define carg_is_helper(opc, carg) ((opc) == INDEX_op_call && (carg) == 0)
 #define carg_is_exitcode(opc, carg) ((opc) == INDEX_op_exit_tb && (carg) == 0)
 static void serialize_op(GByteArray *op_buf, TCGOp *op, bool *temp_used)
@@ -123,7 +126,7 @@ static void serialize_op(GByteArray *op_buf, TCGOp *op, bool *temp_used)
     }
     for (j = 0; j < nb_cargs; i++, j++) {
         uint64_t carg = op->args[i];
-        if (carg_is_label[c][j]) {
+        if (carg_is_label(c, j)) {
             carg = arg_label(op->args[i])->id;
         }
         if (carg_is_helper(c, j)) {
@@ -330,18 +333,27 @@ static LLVMTypeRef map_type(TCGLLVMContext *l, TCGType tcg_type)
 static inline void check_error(LLVMErrorRef e)
 {
     if (e) {
-        char *m = LLVMGetErrorMessage(e);
-        qemu_log("%s\n", m);
-        LLVMDisposeErrorMessage(m);
+        char *msg = LLVMGetErrorMessage(e);
+        qemu_log("%s\n", msg);
+        LLVMDisposeErrorMessage(msg);
         exit(1);
     }
 }
 
 static inline void dump_module(LLVMModuleRef mod)
 {
+    //LLVMDumpModule(mod);
     char *str = LLVMPrintModuleToString(mod);
     qemu_log("%s", str);
     LLVMDisposeMessage(str);
+}
+static inline void write_module(LLVMModuleRef mod, const char *filename)
+{
+    char *msg = NULL;
+    if (LLVMPrintModuleToFile(mod, filename, &msg)) {
+        qemu_log("%s\n", msg);
+        LLVMDisposeMessage(msg);
+    }
 }
 
 static void set_tb_func_attr(TCGLLVMContext *l, LLVMValueRef fn)
@@ -363,11 +375,13 @@ static void set_tb_call_attr(TCGLLVMContext *l, LLVMValueRef instr)
 
 
 /* Get basic block of tcg label */
+#define fmt_label_name(array, label_id) \
+    snprintf(array, sizeof(array), "L%u", label_id)
 static LLVMBasicBlockRef get_label(TCGLLVMContext *l, unsigned label_id)
 {
     if (!g_hash_table_contains(l->labels, GINT_TO_POINTER(label_id))) {
         char buf[MAX_SYMNAME];
-        sprintf(buf, "L%u", label_id);
+        fmt_label_name(buf, label_id);
         g_hash_table_insert(l->labels, GINT_TO_POINTER(label_id), NEWBB(buf));
     }
     return g_hash_table_lookup(l->labels, GINT_TO_POINTER(label_id));
@@ -383,17 +397,50 @@ static void switch_bb(TCGLLVMContext *l, LLVMBasicBlockRef next_bb)
 }
 
 
-
-static void make_helper_symbol(char *symname, const TCGHelperInfo *info)
+static LLVMValueRef get_epilogue(TCGLLVMContext *l)
 {
-    snprintf(symname, MAX_SYMNAME,
-        "helper_%ld_%s", info - all_helpers, info->name);
+    LLVMValueRef fn;
+    fn = LLVMGetNamedFunction(l->mod, "epilogue");
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, "epilogue", l->tb_type);
+        set_tb_func_attr(l, fn);
+    }
+    return fn;
 }
+static LLVMValueRef get_ret_pc(TCGLLVMContext *l)
+{
+    LLVMValueRef val;
+    val = LLVMGetNamedGlobal(l->mod, "ret_pc");
+    if (!val) {
+        val = LLVMAddGlobal(l->mod, INTTY(64), "ret_pc");
+    }
+    return val;
+}
+static LLVMValueRef get_map_pc(TCGLLVMContext *l)
+{
+    LLVMValueRef fn;
+    fn = LLVMGetNamedFunction(l->mod, "map_pc");
+    if (!fn) {
+        fn = LLVMAddFunction(l->mod, "map_pc",
+            FUNCTY(PTRTY(l->tb_type), PTRTY(l->env_ty)));
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_nounwind);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_readonly);
+        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
+            l->attr_willreturn);
+    }
+    return fn;
+}
+
+#define fmt_helper_symbol(array, idx) \
+    snprintf(array, sizeof(array), \
+        "helper_%d_%s", idx, all_helpers[idx].name)
 static LLVMValueRef get_helper(TCGLLVMContext *l, int idx)
 {
     LLVMValueRef fn;
     char symname[MAX_SYMNAME];
-    make_helper_symbol(symname, &all_helpers[idx]);
+    fmt_helper_symbol(symname, idx);
     fn = LLVMGetNamedFunction(l->mod, symname);
     if (!fn) {
         fn = LLVMAddFunction(l->mod, symname,
@@ -423,70 +470,109 @@ static void set_helper_call_attr(TCGLLVMContext *l, LLVMValueRef instr, int idx)
     }
 }
 
-static void make_tb_symbol(char *symname, const char *t, target_ulong pc)
-{
-    snprintf(symname, MAX_SYMNAME, "%s_%016" PRIx64, t, (uint64_t) pc);
-}
+#define fmt_tb_symbol(array, prefix, pc) \
+    snprintf(array, sizeof(array), prefix "_%016" PRIx64, (uint64_t) (pc))
 static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
 {
     LLVMValueRef fn;
     char symname[MAX_SYMNAME];
-    make_tb_symbol(symname, "tb", pc);
+    fmt_tb_symbol(symname, "tb", pc);
     fn = LLVMGetNamedFunction(l->mod, symname);
     if (!fn) {
         fn = LLVMAddFunction(l->mod, symname, l->tb_type);
         set_tb_func_attr(l, fn);
-    }
-    return fn;
-}
-static LLVMValueRef get_tb_stub(TCGLLVMContext *l, target_ulong pc)
-{
-    LLVMValueRef stub;
-    char symname[MAX_SYMNAME];
-    make_tb_symbol(symname, "stub", pc);
-    stub = LLVMGetNamedGlobal(l->mod, symname);
-    if (!stub) {
-        stub = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
-        if (g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
-            LLVMSetInitializer(stub, get_tb_func(l, pc));
-            LLVMSetGlobalConstant(stub, 1);
-            LLVMSetLinkage(stub, LLVMInternalLinkage);
-        } else {
-            LLVMSetInitializer(stub, LLVMConstPointerNull(PTRTY(l->tb_type)));
-            LLVMSetLinkage(stub, LLVMWeakAnyLinkage);
+        if (!g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
+            g_array_append_val(l->tb_fwdrefs, pc);
         }
-        g_array_append_val(l->tb_curstubs, pc);
-    }
-    return stub;
-}
-
-
-static LLVMValueRef get_epilogue(TCGLLVMContext *l)
-{
-    LLVMValueRef fn;
-    fn = LLVMGetNamedFunction(l->mod, "epilogue");
-    if (!fn) {
-        fn = LLVMAddFunction(l->mod, "epilogue", l->tb_type);
-        set_tb_func_attr(l, fn);
     }
     return fn;
 }
-static LLVMValueRef get_pc2func(TCGLLVMContext *l)
+
+static void define_exit(TCGLLVMContext *l)
 {
-    LLVMValueRef fn;
-    fn = LLVMGetNamedFunction(l->mod, "pc2func");
-    if (!fn) {
-        fn = LLVMAddFunction(l->mod, "pc2func",
-            FUNCTY(PTRTY(l->tb_type), PTRTY(l->env_ty)));
-        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-            l->attr_nounwind);
-        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-            l->attr_readonly);
-        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-            l->attr_willreturn);
+    unsigned long i;
+    target_ulong pc;
+    for (i = 0; i < l->tb_fwdrefs->len; i++) {
+        pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
+
+        l->fn = get_tb_func(l, pc);
+        LLVMSetLinkage(l->fn, LLVMWeakAnyLinkage);
+        LLVMSetVisibility(l->fn, LLVMHiddenVisibility);
+        LLVMPositionBuilderAtEnd(l->bldr, 
+            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+        
+        /* save pc */
+        ST(CONST(64, pc), get_ret_pc(l));
+
+        /* call epilogue */
+        {
+            int i;
+            LLVMValueRef args[l->nb_fastreg + 1];
+            LLVMValueRef result;
+            for (i = 0; i < l->nb_fastreg + 1; i++) {
+                args[i] = PARAM(i);
+            }
+            result = LLVMBuildCall2(l->bldr,
+                l->tb_type, get_epilogue(l), args, l->nb_fastreg + 1, "");
+            set_tb_call_attr(l, result);
+            LLVMBuildRetVoid(l->bldr);
+        }
+
+        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
     }
-    return fn;
 }
+static void define_stub(TCGLLVMContext *l)
+{
+    char symname[MAX_SYMNAME];
+    unsigned long i;
+    target_ulong pc;
+    LLVMValueRef fwdptr;
+    LLVMValueRef jmpptr_fn;
+
+    for (i = 0; i < l->tb_fwdrefs->len; i++) {
+        pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
+
+        l->fn = get_tb_func(l, pc);
+
+        fmt_tb_symbol(symname, "fwdptr", pc);
+        fwdptr = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
+
+        fmt_tb_symbol(symname, "jmpptr", pc);
+        jmpptr_fn = LLVMAddFunction(l->mod, symname, l->tb_type);
+        set_tb_func_attr(l, jmpptr_fn);
+        LLVMReplaceAllUsesWith(l->fn, jmpptr_fn);
+
+        fmt_tb_symbol(symname, "stub", pc);
+        LLVMSetValueName2(l->fn, symname, strlen(symname));
+        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
+        if (!g_hash_table_contains(l->tb_fwdptrs, (void *)(uintptr_t)pc)) {
+            LLVMSetInitializer(fwdptr, l->fn);
+        }
+        l->fn = jmpptr_fn;
+
+        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
+        LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
+            l->attr_alwaysinline);
+        LLVMPositionBuilderAtEnd(l->bldr, 
+            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+
+        {
+            int i;
+            LLVMValueRef args[l->nb_fastreg + 1];
+            LLVMValueRef result;
+            for (i = 0; i < l->nb_fastreg + 1; i++) {
+                args[i] = PARAM(i);
+            }
+            result = LLVMBuildCall2(l->bldr,
+                l->tb_type, LD(fwdptr), args, l->nb_fastreg + 1, "");
+            set_tb_call_attr(l, result);
+            LLVMBuildRetVoid(l->bldr);
+        }
+        
+        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+    }
+}
+
 
 static LLVMValueRef get_qemu_ld(TCGLLVMContext *l, LLVMTypeRef ty)
 {
@@ -506,24 +592,6 @@ static LLVMValueRef get_qemu_ld(TCGLLVMContext *l, LLVMTypeRef ty)
     }
     return fn;
 }
-static void define_qemu_ld(TCGLLVMContext *l)
-{
-    unsigned i;
-    for (i = 0; i < l->fn_qemu_ld->len; i++) {
-        l->fn = g_ptr_array_index(l->fn_qemu_ld, i);
-        LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
-            l->attr_alwaysinline);
-        LLVMRemoveEnumAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
-            LLVMGetEnumAttributeKind(l->attr_inaccessiblememonly));
-        LLVMPositionBuilderAtEnd(l->bldr, 
-            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
-        LLVMBuildRet(l->bldr,
-            SET_VOLATILE(LD(I2P(PARAM(0), LLVMGetReturnType(ELETY(TYOF(l->fn)))))));
-        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
-        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
-    }
-    g_ptr_array_set_size(l->fn_qemu_ld, 0);
-}
 static LLVMValueRef get_qemu_st(TCGLLVMContext *l, LLVMTypeRef ty)
 {
     LLVMValueRef fn;
@@ -542,9 +610,24 @@ static LLVMValueRef get_qemu_st(TCGLLVMContext *l, LLVMTypeRef ty)
     }
     return fn;
 }
-static void define_qemu_st(TCGLLVMContext *l)
+
+static void define_qemu_ld_st(TCGLLVMContext *l, bool internal)
 {
     unsigned i;
+    for (i = 0; i < l->fn_qemu_ld->len; i++) {
+        l->fn = g_ptr_array_index(l->fn_qemu_ld, i);
+        LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
+            l->attr_alwaysinline);
+        LLVMRemoveEnumAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
+            LLVMGetEnumAttributeKind(l->attr_inaccessiblememonly));
+        LLVMPositionBuilderAtEnd(l->bldr, 
+            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+        LLVMBuildRet(l->bldr,
+            SET_VOLATILE(LD(I2P(PARAM(0), LLVMGetReturnType(ELETY(TYOF(l->fn)))))));
+        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+        LLVMSetVisibility(l->fn, LLVMHiddenVisibility);
+        if (internal) LLVMSetLinkage(l->fn, LLVMInternalLinkage);
+    }
     for (i = 0; i < l->fn_qemu_st->len; i++) {
         l->fn = g_ptr_array_index(l->fn_qemu_st, i);
         LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
@@ -556,49 +639,20 @@ static void define_qemu_st(TCGLLVMContext *l)
         SET_VOLATILE(ST(PARAM(0), I2P(PARAM(1), TYOF(PARAM(0)))));
         LLVMBuildRetVoid(l->bldr);
         LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
-        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
+        LLVMSetVisibility(l->fn, LLVMHiddenVisibility);
+        if (internal) LLVMSetLinkage(l->fn, LLVMInternalLinkage);
     }
+    g_ptr_array_set_size(l->fn_qemu_ld, 0);
     g_ptr_array_set_size(l->fn_qemu_st, 0);
 }
 
 
-static void define_dummy(TCGLLVMContext *l)
-{
-    unsigned i;
-    for (i = 0; i < l->fn_dummy->len; i++) {
-        l->fn = g_ptr_array_index(l->fn_dummy, i);
-        LLVMPositionBuilderAtEnd(l->bldr, 
-            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
-        LLVMBuildRet(l->bldr,
-            LLVMGetUndef(LLVMGetReturnType(ELETY(TYOF(l->fn)))));
-        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
-        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
-    }
-    g_ptr_array_set_size(l->fn_dummy, 0);
-}
-static LLVMValueRef get_dummy(TCGLLVMContext *l, LLVMTypeRef ty)
-{
-    LLVMValueRef fn;
-    char symname[MAX_SYMNAME];
-    sprintf(symname, "dummy%u", LLVMGetIntTypeWidth(ty));
-    fn = LLVMGetNamedFunction(l->mod, symname);
-    if (!fn) {
-        fn = LLVMAddFunction(l->mod, symname, FUNCTY(ty));
-        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-            l->attr_readnone);
-        LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
-            l->attr_willreturn);
-        g_ptr_array_add(l->fn_dummy, fn);
-    }
-    return fn;
-}
-
-static void sync_fastreg(TCGLLVMContext *l, bool use_dummy)
+static void sync_fastreg(TCGLLVMContext *l, bool use_undef)
 {
     int i;
     for (i = 0; i < l->nb_fastreg; i++) {
         ST(
-            use_dummy ? CALL(get_dummy(l, l->regmap[i].ty)) : PARAM(i),
+            use_undef ? LLVMGetUndef(l->regmap[i].ty) : PARAM(i),
             ENV(l->regmap[i].off, l->regmap[i].ty, "")
         );
     }
@@ -1085,12 +1139,12 @@ do { \
 
         case INDEX_op_goto_tb: {
             target_ulong next_pc = ARG1;
-            next_tb = LD(get_tb_stub(l, next_pc));
+            next_tb = get_tb_func(l, next_pc);
             switch_bb_delay = NEWBB("dead");
             goto chain_next_tb;
         }
         case INDEX_op_goto_ptr: {
-            next_tb = CALL(get_pc2func(l), l->env);
+            next_tb = CALL(get_map_pc(l), l->env);
             goto chain_next_tb;
         }
         case INDEX_op_exit_tb: {
@@ -1134,90 +1188,33 @@ do { \
 static __thread struct {
     target_ulong pc;
     void *func;
-} pc2func_hashtbl[PC2FUNC_HASHSEED];
-#define pc2func_item(pc) pc2func_hashtbl[(pc) % PC2FUNC_HASHSEED]
+} map_pc_hashtbl[PC2FUNC_HASHSEED];
+#define map_pc_item(pc) map_pc_hashtbl[(pc) % PC2FUNC_HASHSEED]
 
-static void *pc2func(CPUArchState *env)
+static void *map_pc(CPUArchState *env)
 {
     TCGLLVMContext *l = tcg_ctx->llvm_ctx;
     target_ulong cs_base, pc;
     uint32_t flags;
     cpu_get_tb_cpu_state(env, &pc, &cs_base, &flags);
-    if (likely(pc2func_item(pc).pc == pc)) {
-        return pc2func_item(pc).func;
+    if (likely(map_pc_item(pc).pc == pc)) {
+        return map_pc_item(pc).func;
     } else {
         return l->epilogue;
     }
 }
 
-static void *alloc_unique_stub(TCGLLVMContext *l, target_ulong pc)
-{
-    void *fn;
-    if (!l->stub_pool->len) {
-        int id;
-        int pool_batch = 100;
-        char symname[MAX_SYMNAME];
-        LLVMValueRef args[l->nb_fastreg + 1], call_instr, last_stub;
-        LLVMOrcThreadSafeModuleRef tsm;
-        LLVMOrcJITTargetAddress addr;
-
-        l->mod = LLVMModuleCreateWithNameInContext("unique_stub", l->ctx);
-        last_stub = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), "last_stub");
-        for (id = 0; id < pool_batch; id++) {
-            int i;
-            sprintf(symname, "unique_stub_%" PRIu64, l->stub_created + id);
-            l->fn = LLVMAddFunction(l->mod, symname, l->tb_type);
-            set_tb_func_attr(l, l->fn);
-            LLVMPositionBuilderAtEnd(l->bldr, 
-            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
-            for (i = 0; i < l->nb_fastreg + 1; i++) {
-                args[i] = PARAM(i);
-            }
-            ST(l->fn, last_stub);
-            call_instr = LLVMBuildCall2(l->bldr,
-                l->tb_type, get_epilogue(l), args, l->nb_fastreg + 1, "");
-            set_tb_call_attr(l, call_instr);
-            QLLVMSetMustTailCall(call_instr, 0);
-            LLVMBuildRetVoid(l->bldr);
-            LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
-        }
-        LLVMRunPassManager(l->mpm_O2, l->mod);
-        //dump_module(l->mod);
-        tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
-        check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
-        for (id = 0; id < pool_batch; id++) {
-            sprintf(symname, "unique_stub_%" PRIu64, l->stub_created + id);
-            check_error(LLVMOrcLLJITLookup(l->jit, &addr, symname));
-            g_ptr_array_add(l->stub_pool, (void *)addr);
-        }
-
-        l->stub_created += pool_batch;
-    }
-    fn = g_ptr_array_remove_index_fast(l->stub_pool, 0);
-    g_hash_table_replace(l->stub_map, fn, (void *)(uintptr_t)pc);
-    //log_disas(fn, 50);
-    return fn;
-}
-static void free_unique_stub(TCGLLVMContext *l, void *fn)
-{
-    g_ptr_array_add(l->stub_pool, fn);
-}
-static target_ulong map_unique_stub(TCGLLVMContext *l, void *fn)
-{
-    return (target_ulong) (uintptr_t) g_hash_table_lookup(l->stub_map, fn);
-}
-
 static void batch_compile(TCGLLVMContext *l)
 {
     LLVMOrcThreadSafeModuleRef tsm;
-    LLVMOrcJITTargetAddress func_addr, stub_addr;
+    LLVMOrcJITTargetAddress func_addr, fwdptr_addr;
     char symname[MAX_SYMNAME];
     unsigned long i;
 
     qemu_log("batch compile!\n");
     l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
 
-    g_array_set_size(l->tb_curstubs, 0);
+    g_array_set_size(l->tb_fwdrefs, 0);
     for (i = 0; i < l->hot_tb->len; i++) {
         TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
         g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)tb->pc);
@@ -1230,23 +1227,20 @@ static void batch_compile(TCGLLVMContext *l)
 
     qemu_log("LLVMRunPassManager bgein! (n=%u)\n", l->hot_tb->len);
     //dump_module(l->mod);
-    LLVMRunPassManager(l->mpm_O2inline, l->mod);
+    define_exit(l);
     if (1) {
         static int dumpid = 0;
         char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
-        FILE *fp = fopen(dumpf, "w");
-        char *str = LLVMPrintModuleToString(l->mod);
-        fputs(str, fp);
-        LLVMDisposeMessage(str);
-        fclose(fp);
+        write_module(l->mod, dumpf);
     }
+    define_stub(l);
     //dump_module(l->mod);
-    define_dummy(l);
-    define_qemu_ld(l);
-    define_qemu_st(l);
+    LLVMRunPassManager(l->mpm_O2inline, l->mod);
+    //dump_module(l->mod);
+    define_qemu_ld_st(l, true);
     LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
     LLVMRunPassManager(l->mpm_O2, l->mod);
-    dump_module(l->mod);
+    //dump_module(l->mod);
     qemu_log("LLVMRunPassManager end!\n");
 
     
@@ -1256,19 +1250,18 @@ static void batch_compile(TCGLLVMContext *l)
     for (i = 0; i < l->hot_tb->len; i++) {
         TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
 
-        make_tb_symbol(symname, "tb", tb->pc);
+        fmt_tb_symbol(symname, "tb", tb->pc);
         check_error(LLVMOrcLLJITLookup(l->jit, &func_addr, symname));
         tb->llvm_tc = (void *)func_addr;
 
-        if (g_hash_table_contains(l->tb_stubs, (void *)(uintptr_t)tb->pc)) {
-            make_tb_symbol(symname, "stub", tb->pc);
-            check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
-            free_unique_stub(l, *(void **)stub_addr);
-            *(void **)stub_addr = (void *)func_addr;
-            g_hash_table_remove(l->tb_stubs, (void *)(uintptr_t)tb->pc);
+        if (g_hash_table_contains(l->tb_fwdptrs, (void *)(uintptr_t)tb->pc)) {
+            fmt_tb_symbol(symname, "fwdptr", tb->pc);
+            check_error(LLVMOrcLLJITLookup(l->jit, &fwdptr_addr, symname));
+            *(void **)fwdptr_addr = (void *)func_addr;
+            g_hash_table_remove(l->tb_fwdptrs, (void *)(uintptr_t)tb->pc);
         }
 
-        make_tb_symbol(symname, "tb", tb->pc);
+        fmt_tb_symbol(symname, "tb", tb->pc);
         qemu_log("%s = %p; %" PRIu64 "; %s\n", symname, tb->llvm_tc, tb->exec_count, tb->packed_tcg.digest);
         /*unsigned char *ptr = tb->packed_tcg.op_buf->data;
         int len = tb->packed_tcg.op_buf->len;
@@ -1282,18 +1275,12 @@ static void batch_compile(TCGLLVMContext *l)
         qemu_log("\n");*/
     }
 
-    for (i = 0; i < l->tb_curstubs->len; i++) {
-        target_ulong pc = g_array_index(l->tb_curstubs, target_ulong, i);
+    for (i = 0; i < l->tb_fwdrefs->len; i++) {
+        target_ulong pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
         if (g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
             continue;
         }
-        if (g_hash_table_contains(l->tb_stubs, (void *)(uintptr_t)pc)) {
-            continue;
-        }
-        make_tb_symbol(symname, "stub", pc);
-        check_error(LLVMOrcLLJITLookup(l->jit, &stub_addr, symname));
-        *(void **)stub_addr = alloc_unique_stub(l, pc);
-        g_hash_table_add(l->tb_stubs, (void *)(uintptr_t)pc);
+        g_hash_table_add(l->tb_fwdptrs, (void *)(uintptr_t)pc);
     }
 
     qemu_log("compile done! (%u compiled)\n", l->hot_tb->len);
@@ -1305,25 +1292,44 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 {
     TCGLLVMContext *l = s->llvm_ctx;
     if (!tb->llvm_tc) {
-        if (tb->exec_count == l->hot_limit1) {
-            g_ptr_array_add(l->hot_tb, tb);
+        if (l->use_cache) {
+            if (tb->exec_count++ == l->hot_limit1) {
+                LLVMOrcJITTargetAddress func_addr;
+                char symname[MAX_SYMNAME];
+                fmt_tb_symbol(symname, "tb", tb->pc);
+                if (LLVMOrcLLJITLookup(l->jit, &func_addr, symname) == 0) {
+                    tb->llvm_tc = (void *)func_addr;
+                    qemu_log("hit %s\n", symname);
+                } else {
+                    qemu_log("miss %s\n", symname);
+                }
+            }
+            if (!tb->llvm_tc) {
+                return false;
+            }
+        } else {
+            if (tb->exec_count == l->hot_limit1) {
+                g_ptr_array_add(l->hot_tb, tb);
+            }
+            if (tb->exec_count < l->hot_limit2) {
+                tb->exec_count++;
+                return false;
+            }
+            batch_compile(l);
         }
-        if (tb->exec_count < l->hot_limit2) {
-            tb->exec_count++;
-            return false;
-        }
-        batch_compile(l);
     }
-    pc2func_item(tb->pc).pc = tb->pc;
-    pc2func_item(tb->pc).func = tb->llvm_tc;
+    /*if (map_pc_item(tb->pc).pc && map_pc_item(tb->pc).pc != tb->pc) {
+        qemu_log("pc hash conflit: %lu %lu\n", map_pc_item(tb->pc).pc, tb->pc);
+    }*/
+    map_pc_item(tb->pc).pc = tb->pc;
+    map_pc_item(tb->pc).func = tb->llvm_tc;
     //qemu_log("llvm exec! begin\n");
-    l->last_stub = NULL;
+    l->ret_pc = 0;
     l->prologue(tb->llvm_tc, env);
-    if (l->last_stub) {
-        target_ulong pc = map_unique_stub(l, l->last_stub);
+    if (l->ret_pc) {
         CPUState *cpu = env_cpu(env);
         CPUClass *cc = CPU_GET_CLASS(cpu);
-        cc->set_pc(cpu, pc);
+        cc->set_pc(cpu, l->ret_pc);
     }
     *ret = 0;
     //qemu_log("pc=%p cc_src=%p\n", (void *)tb->pc, (void *)env->cc_src);
@@ -1365,11 +1371,11 @@ static void commit_absolute_symbol(TCGLLVMContext *l)
 
 static void init_helpers(TCGLLVMContext *l)
 {
-    int i;
+    int idx;
     char symname[MAX_SYMNAME];
-    for (i = 0; all_helpers[i].func; i++) {
-        make_helper_symbol(symname, &all_helpers[i]);
-        add_absolute_symbol(l, symname, all_helpers[i].func);
+    for (idx = 0; all_helpers[idx].func; idx++) {
+        fmt_helper_symbol(symname, idx);
+        add_absolute_symbol(l, symname, all_helpers[idx].func);
     }
 }
 
@@ -1379,7 +1385,7 @@ static void init_prologue(TCGLLVMContext *l)
     LLVMValueRef args[l->nb_fastreg + 1];
     LLVMValueRef prologue_call;
     LLVMOrcThreadSafeModuleRef tsm;
-    LLVMOrcJITTargetAddress addr;
+    LLVMOrcJITTargetAddress func_addr;
 
     l->mod = LLVMModuleCreateWithNameInContext("prologue", l->ctx);
 
@@ -1400,6 +1406,7 @@ static void init_prologue(TCGLLVMContext *l)
     QLLVMSetMustTailCall(prologue_call, 0);
     LLVMBuildRetVoid(l->bldr);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+    LLVMSetVisibility(l->fn, LLVMHiddenVisibility);
 
     l->fn = get_epilogue(l);
     LLVMPositionBuilderAtEnd(l->bldr,
@@ -1408,18 +1415,30 @@ static void init_prologue(TCGLLVMContext *l)
     sync_fastreg(l, false);
     LLVMBuildRetVoid(l->bldr);
     LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+    LLVMSetVisibility(l->fn, LLVMHiddenVisibility);
 
-    LLVMRunPassManager(l->mpm_O2, l->mod);
+    get_qemu_ld(l, INTTY( 8)); get_qemu_st(l, INTTY( 8));
+    get_qemu_ld(l, INTTY(16)); get_qemu_st(l, INTTY(16));
+    get_qemu_ld(l, INTTY(32)); get_qemu_st(l, INTTY(32));
+    get_qemu_ld(l, INTTY(64)); get_qemu_st(l, INTTY(64));
+    define_qemu_ld_st(l, false);
+    
+    LLVMRunPassManager(l->mpm_O2, l->mod);    
     //dump_module(l->mod);
+    write_module(l->mod, "prologue.ll");
+    
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
-    check_error(LLVMOrcLLJITLookup(l->jit, &addr, "prologue"));
-    l->prologue = (void *)addr;
-    //log_disas((void *)addr, 50);
-    check_error(LLVMOrcLLJITLookup(l->jit, &addr, "epilogue"));
-    l->epilogue = (void *)addr;
-    //log_disas((void *)addr, 50);
+    
+
+    check_error(LLVMOrcLLJITLookup(l->jit, &func_addr, "prologue"));
+    l->prologue = (void *)func_addr;
+    //log_disas((void *)func_addr, 50);
+    check_error(LLVMOrcLLJITLookup(l->jit, &func_addr, "epilogue"));
+    l->epilogue = (void *)func_addr;
+    //log_disas((void *)func_addr, 50);
+
 }
 
 static LLVMOrcObjectLayerRef create_oll_with_jitperf(
@@ -1511,11 +1530,8 @@ void tcg_llvm_context_init(TCGContext *s)
     l->labels = g_hash_table_new(NULL, NULL);
 
     l->tb_compiled = g_hash_table_new(NULL, NULL);
-    l->tb_stubs = g_hash_table_new(NULL, NULL);
-    l->tb_curstubs = g_array_new(FALSE, FALSE, sizeof(target_ulong));
-
-    l->stub_pool = g_ptr_array_new();
-    l->stub_map = g_hash_table_new(NULL, NULL);
+    l->tb_fwdptrs = g_hash_table_new(NULL, NULL);
+    l->tb_fwdrefs = g_array_new(FALSE, FALSE, sizeof(target_ulong));
 
     l->hot_tb = g_ptr_array_new();
     l->hot_limit1 = 1000;
@@ -1551,10 +1567,22 @@ void tcg_llvm_context_init(TCGContext *s)
 
     init_prologue(l);
     init_helpers(l);
-    add_absolute_symbol(l, "last_stub", &l->last_stub);
-    add_absolute_symbol(l, "pc2func", pc2func);
-
+    add_absolute_symbol(l, "ret_pc", &l->ret_pc);
+    add_absolute_symbol(l, "map_pc", map_pc);
     commit_absolute_symbol(l);
+    
+    l->use_cache = 1;
+    if (l->use_cache) {
+        char *msg = NULL;
+        LLVMMemoryBufferRef membuf = NULL;
+        if (LLVMCreateMemoryBufferWithContentsOfFile("tmp.o", &membuf, &msg)) {
+            qemu_log("%s", msg);
+            LLVMDisposeMessage(msg);
+            tcg_abort();
+        }
+        check_error(LLVMOrcLLJITAddObjectFile(l->jit, l->jd, membuf));
+    }
+    qemu_log("init ok!\n");
 }
 
 void tcg_llvm_init(void)
