@@ -488,74 +488,23 @@ static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
     return fn;
 }
 
-static void define_exit(TCGLLVMContext *l)
-{
-    unsigned long i;
-    target_ulong pc;
-    for (i = 0; i < l->tb_fwdrefs->len; i++) {
-        pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
-
-        l->fn = get_tb_func(l, pc);
-        LLVMSetLinkage(l->fn, LLVMWeakAnyLinkage);
-        LLVMSetVisibility(l->fn, LLVMHiddenVisibility);
-        LLVMPositionBuilderAtEnd(l->bldr, 
-            LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
-        
-        /* save pc */
-        ST(CONST(64, pc), get_ret_pc(l));
-
-        /* call epilogue */
-        {
-            int i;
-            LLVMValueRef args[l->nb_fastreg + 1];
-            LLVMValueRef result;
-            for (i = 0; i < l->nb_fastreg + 1; i++) {
-                args[i] = PARAM(i);
-            }
-            result = LLVMBuildCall2(l->bldr,
-                l->tb_type, get_epilogue(l), args, l->nb_fastreg + 1, "");
-            set_tb_call_attr(l, result);
-            LLVMBuildRetVoid(l->bldr);
-        }
-
-        LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
-    }
-}
 static void define_stub(TCGLLVMContext *l)
 {
     char symname[MAX_SYMNAME];
     unsigned long i;
     target_ulong pc;
     LLVMValueRef fwdptr;
-    LLVMValueRef jmpptr_fn;
 
     for (i = 0; i < l->tb_fwdrefs->len; i++) {
         pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
 
-        l->fn = get_tb_func(l, pc);
-
         fmt_tb_symbol(symname, "fwdptr", pc);
         fwdptr = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
-
-        fmt_tb_symbol(symname, "jmpptr", pc);
-        jmpptr_fn = LLVMAddFunction(l->mod, symname, l->tb_type);
-        set_tb_func_attr(l, jmpptr_fn);
-        LLVMReplaceAllUsesWith(l->fn, jmpptr_fn);
-
-        fmt_tb_symbol(symname, "stub", pc);
-        LLVMSetValueName2(l->fn, symname, strlen(symname));
-        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
-        if (!g_hash_table_contains(l->tb_fwdptrs, (void *)(uintptr_t)pc)) {
-            LLVMSetInitializer(fwdptr, l->fn);
-        }
-        l->fn = jmpptr_fn;
-
-        LLVMSetLinkage(l->fn, LLVMInternalLinkage);
-        LLVMAddAttributeAtIndex(l->fn, LLVMAttributeFunctionIndex,
-            l->attr_alwaysinline);
+        
+        l->fn = get_tb_func(l, pc);
+        LLVMSetLinkage(l->fn, LLVMLinkOnceAnyLinkage);
         LLVMPositionBuilderAtEnd(l->bldr, 
             LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
-
         {
             int i;
             LLVMValueRef args[l->nb_fastreg + 1];
@@ -568,11 +517,50 @@ static void define_stub(TCGLLVMContext *l)
             set_tb_call_attr(l, result);
             LLVMBuildRetVoid(l->bldr);
         }
-        
         LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+
+        if (!g_hash_table_contains(l->tb_fwdptrs, (void *)(uintptr_t)pc)) {
+            fmt_tb_symbol(symname, "stub", pc);
+            l->fn = LLVMAddFunction(l->mod, symname, l->tb_type);
+            set_tb_func_attr(l, l->fn);
+
+            LLVMSetLinkage(fwdptr, LLVMLinkOnceAnyLinkage);
+            LLVMSetInitializer(fwdptr, l->fn);
+        
+            LLVMSetLinkage(l->fn, LLVMLinkOnceODRLinkage);
+            LLVMPositionBuilderAtEnd(l->bldr, 
+                LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
+
+            /* save pc */
+            ST(CONST(64, pc), get_ret_pc(l));
+
+            /* call epilogue */
+            {
+                int i;
+                LLVMValueRef args[l->nb_fastreg + 1];
+                LLVMValueRef result;
+                for (i = 0; i < l->nb_fastreg + 1; i++) {
+                    args[i] = PARAM(i);
+                }
+                result = LLVMBuildCall2(l->bldr,
+                    l->tb_type, get_epilogue(l), args, l->nb_fastreg + 1, "");
+                set_tb_call_attr(l, result);
+                LLVMBuildRetVoid(l->bldr);
+            }
+
+            LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
+        }
     }
 }
-
+static void internalize_stub(TCGLLVMContext *l)
+{
+    unsigned long i;
+    target_ulong pc;
+    for (i = 0; i < l->tb_fwdrefs->len; i++) {
+        pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
+        LLVMSetLinkage(get_tb_func(l, pc), LLVMInternalLinkage);
+    }
+}
 
 static LLVMValueRef get_qemu_ld(TCGLLVMContext *l, LLVMTypeRef ty)
 {
@@ -1227,13 +1215,13 @@ static void batch_compile(TCGLLVMContext *l)
 
     qemu_log("LLVMRunPassManager bgein! (n=%u)\n", l->hot_tb->len);
     //dump_module(l->mod);
-    define_exit(l);
+    define_stub(l);
     if (1) {
         static int dumpid = 0;
         char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
         write_module(l->mod, dumpf);
     }
-    define_stub(l);
+    internalize_stub(l);
     //dump_module(l->mod);
     LLVMRunPassManager(l->mpm_O2inline, l->mod);
     //dump_module(l->mod);
@@ -1299,10 +1287,14 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
                 fmt_tb_symbol(symname, "tb", tb->pc);
                 if (LLVMOrcLLJITLookup(l->jit, &func_addr, symname) == 0) {
                     tb->llvm_tc = (void *)func_addr;
-                    qemu_log("hit %s\n", symname);
-                } else {
-                    qemu_log("miss %s\n", symname);
                 }
+                fmt_tb_symbol(symname, "fwdptr", tb->pc);
+                if (LLVMOrcLLJITLookup(l->jit, &func_addr, symname) == 0) {
+                    tb->llvm_tc = NULL;
+                }
+
+                fmt_tb_symbol(symname, "tb", tb->pc);
+                qemu_log("%s %s\n", tb->llvm_tc ? "hit" : "miss", symname);
             }
             if (!tb->llvm_tc) {
                 return false;
