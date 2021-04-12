@@ -353,6 +353,7 @@ static inline void write_module(LLVMModuleRef mod, const char *filename)
     if (LLVMPrintModuleToFile(mod, filename, &msg)) {
         qemu_log("%s\n", msg);
         LLVMDisposeMessage(msg);
+        tcg_abort();
     }
 }
 
@@ -379,12 +380,12 @@ static void set_tb_call_attr(TCGLLVMContext *l, LLVMValueRef instr)
     snprintf(array, sizeof(array), "L%u", label_id)
 static LLVMBasicBlockRef get_label(TCGLLVMContext *l, unsigned label_id)
 {
-    if (!g_hash_table_contains(l->labels, GINT_TO_POINTER(label_id))) {
+    if (!g_hash_table_contains(l->labels, GUINT_TO_POINTER(label_id))) {
         char buf[MAX_SYMNAME];
         fmt_label_name(buf, label_id);
-        g_hash_table_insert(l->labels, GINT_TO_POINTER(label_id), NEWBB(buf));
+        g_hash_table_insert(l->labels, GUINT_TO_POINTER(label_id), NEWBB(buf));
     }
-    return g_hash_table_lookup(l->labels, GINT_TO_POINTER(label_id));
+    return g_hash_table_lookup(l->labels, GUINT_TO_POINTER(label_id));
 }
 
 /* Finish current block and switch builder to the given block */
@@ -470,6 +471,8 @@ static void set_helper_call_attr(TCGLLVMContext *l, LLVMValueRef instr, int idx)
     }
 }
 
+static int load_cache_meta(TCGLLVMContext *l, target_ulong pc);
+
 #define fmt_tb_symbol(array, prefix, pc) \
     snprintf(array, sizeof(array), prefix "_%016" PRIx64, (uint64_t) (pc))
 static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
@@ -481,6 +484,7 @@ static LLVMValueRef get_tb_func(TCGLLVMContext *l, target_ulong pc)
     if (!fn) {
         fn = LLVMAddFunction(l->mod, symname, l->tb_type);
         set_tb_func_attr(l, fn);
+        load_cache_meta(l, pc);
         if (!g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
             g_array_append_val(l->tb_fwdrefs, pc);
         }
@@ -501,11 +505,13 @@ static void define_stub(TCGLLVMContext *l)
         fmt_tb_symbol(symname, "fwdptr", pc);
         fwdptr = LLVMAddGlobal(l->mod, PTRTY(l->tb_type), symname);
         
+        /* Generate tb placeholder with weak linkage */
         l->fn = get_tb_func(l, pc);
         LLVMSetLinkage(l->fn, LLVMLinkOnceAnyLinkage);
         LLVMPositionBuilderAtEnd(l->bldr, 
             LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
         {
+            /* Call fwdptr */
             int i;
             LLVMValueRef args[l->nb_fastreg + 1];
             LLVMValueRef result;
@@ -520,6 +526,7 @@ static void define_stub(TCGLLVMContext *l)
         LLVMVerifyFunction(l->fn, LLVMAbortProcessAction);
 
         if (!g_hash_table_contains(l->tb_fwdptrs, (void *)(uintptr_t)pc)) {
+            /* Generate tb stub, which may be replaced later */
             fmt_tb_symbol(symname, "stub", pc);
             l->fn = LLVMAddFunction(l->mod, symname, l->tb_type);
             set_tb_func_attr(l, l->fn);
@@ -531,10 +538,10 @@ static void define_stub(TCGLLVMContext *l)
             LLVMPositionBuilderAtEnd(l->bldr, 
                 LLVMAppendBasicBlockInContext(l->ctx, l->fn, "entry"));
 
-            /* save pc */
+            /* Save pc to global var */
             ST(CONST(64, pc), get_ret_pc(l));
 
-            /* call epilogue */
+            /* Call epilogue */
             {
                 int i;
                 LLVMValueRef args[l->nb_fastreg + 1];
@@ -552,12 +559,15 @@ static void define_stub(TCGLLVMContext *l)
         }
     }
 }
-static void internalize_stub(TCGLLVMContext *l)
+static void internalize_tb_placeholder(TCGLLVMContext *l)
 {
     unsigned long i;
     target_ulong pc;
     for (i = 0; i < l->tb_fwdrefs->len; i++) {
         pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
+
+        /* Set linkage to internal to avoid confilt,
+           because weak symbol will become strong after materializing */
         LLVMSetLinkage(get_tb_func(l, pc), LLVMInternalLinkage);
     }
 }
@@ -1192,6 +1202,39 @@ static void *map_pc(CPUArchState *env)
     }
 }
 
+/* return 0 if not cached
+   return -1 if has fwdptr
+   return 1 if cached */
+static int load_cache_meta(TCGLLVMContext *l, target_ulong pc)
+{
+    LLVMOrcJITTargetAddress dummy;
+    char symname[MAX_SYMNAME];
+    int ret = 0;
+
+    /* must cache result to avoid result changing */
+    if (g_hash_table_contains(l->cache_meta, GUINT_TO_POINTER(pc))) {
+        return GPOINTER_TO_INT(
+            g_hash_table_lookup(l->cache_meta, GUINT_TO_POINTER(pc)));
+    }
+
+    fmt_tb_symbol(symname, "fwdptr", pc);
+    if (LLVMOrcLLJITLookup(l->jit, &dummy, symname) == 0) {
+        /* has fwdptr */
+        g_hash_table_add(l->tb_fwdptrs, (void *)(uintptr_t)pc);
+        ret = -1;
+    } else {
+        fmt_tb_symbol(symname, "tb", pc);
+        if (LLVMOrcLLJITLookup(l->jit, &dummy, symname) == 0) {
+            /* in cache */
+            g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)pc);
+            ret = 1;
+        }
+    }
+    g_hash_table_insert(l->cache_meta,
+        GUINT_TO_POINTER(pc), GINT_TO_POINTER(ret));
+    return ret;
+}
+
 static void batch_compile(TCGLLVMContext *l)
 {
     LLVMOrcThreadSafeModuleRef tsm;
@@ -1200,40 +1243,62 @@ static void batch_compile(TCGLLVMContext *l)
     unsigned long i;
 
     qemu_log("batch compile!\n");
-    l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
 
-    g_array_set_size(l->tb_fwdrefs, 0);
+    unsigned long tb_cached = 0;
     for (i = 0; i < l->hot_tb->len; i++) {
         TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
-        g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)tb->pc);
-    }
-    for (i = 0; i < l->hot_tb->len; i++) {
-        TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
-        gen_code(l, tb);
+        if (load_cache_meta(l, tb->pc) > 0) {
+            tb_cached++;
+        }
     }
 
+    if (l->hot_tb->len > tb_cached) {
 
-    qemu_log("LLVMRunPassManager bgein! (n=%u)\n", l->hot_tb->len);
-    //dump_module(l->mod);
-    define_stub(l);
-    if (1) {
-        static int dumpid = 0;
-        char dumpf[1000]; sprintf(dumpf, "dump%d.ll", dumpid++);
-        write_module(l->mod, dumpf);
+        for (i = 0; i < l->hot_tb->len; i++) {
+            TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
+            g_hash_table_add(l->tb_compiled, (void *)(uintptr_t)tb->pc);
+        }
+
+        l->mod = LLVMModuleCreateWithNameInContext("jit", l->ctx);
+        g_array_set_size(l->tb_fwdrefs, 0);
+
+        for (i = 0; i < l->hot_tb->len; i++) {
+            TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
+            if (load_cache_meta(l, tb->pc) <= 0) {
+                gen_code(l, tb);
+            }
+        }
+
+        qemu_log("LLVMRunPassManager bgein! (n=%u)\n", l->hot_tb->len);
+        //dump_module(l->mod);
+        define_stub(l);
+        if (1) {
+            static int dumpid = 0;
+            char dumpf[1000];
+            do {
+                sprintf(dumpf, TCG_LLVM_CACHE_DIR "/dump%d.ll", dumpid++);
+            } while (access(dumpf, F_OK) == 0);
+            write_module(l->mod, dumpf);
+        }
+        internalize_tb_placeholder(l);
+        //dump_module(l->mod);
+        LLVMRunPassManager(l->mpm_O2inline, l->mod);
+        //dump_module(l->mod);
+        define_qemu_ld_st(l, true);
+        LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
+        LLVMRunPassManager(l->mpm_O2, l->mod);
+        //dump_module(l->mod);
+        qemu_log("LLVMRunPassManager end!\n");
+
+        
+        tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
+        check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
+
+        for (i = 0; i < l->tb_fwdrefs->len; i++) {
+            target_ulong pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
+            g_hash_table_add(l->tb_fwdptrs, (void *)(uintptr_t)pc);
+        }
     }
-    internalize_stub(l);
-    //dump_module(l->mod);
-    LLVMRunPassManager(l->mpm_O2inline, l->mod);
-    //dump_module(l->mod);
-    define_qemu_ld_st(l, true);
-    LLVMRunPassManager(l->mpm_alwaysinline, l->mod);
-    LLVMRunPassManager(l->mpm_O2, l->mod);
-    //dump_module(l->mod);
-    qemu_log("LLVMRunPassManager end!\n");
-
-    
-    tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
-    check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
 
     for (i = 0; i < l->hot_tb->len; i++) {
         TranslationBlock *tb = g_ptr_array_index(l->hot_tb, i);
@@ -1250,7 +1315,7 @@ static void batch_compile(TCGLLVMContext *l)
         }
 
         fmt_tb_symbol(symname, "tb", tb->pc);
-        qemu_log("%s = %p; %" PRIu64 "; %s\n", symname, tb->llvm_tc, tb->exec_count, tb->packed_tcg.digest);
+        qemu_log("%s = %p; cached = %d; %" PRIu64 "; %s\n", symname, tb->llvm_tc, load_cache_meta(l, tb->pc), tb->exec_count, tb->packed_tcg.digest);
         /*unsigned char *ptr = tb->packed_tcg.op_buf->data;
         int len = tb->packed_tcg.op_buf->len;
         for (int p = 0; p < len; p++) {
@@ -1263,15 +1328,7 @@ static void batch_compile(TCGLLVMContext *l)
         qemu_log("\n");*/
     }
 
-    for (i = 0; i < l->tb_fwdrefs->len; i++) {
-        target_ulong pc = g_array_index(l->tb_fwdrefs, target_ulong, i);
-        if (g_hash_table_contains(l->tb_compiled, (void *)(uintptr_t)pc)) {
-            continue;
-        }
-        g_hash_table_add(l->tb_fwdptrs, (void *)(uintptr_t)pc);
-    }
-
-    qemu_log("compile done! (%u compiled)\n", l->hot_tb->len);
+    qemu_log("compile done! (%lu compiled, %lu cached)\n", l->hot_tb->len - tb_cached, tb_cached);
     g_ptr_array_set_size(l->hot_tb, 0);
 }
 
@@ -1280,35 +1337,14 @@ bool tcg_llvm_try_exec_tb(TCGContext *s, TranslationBlock *tb,
 {
     TCGLLVMContext *l = s->llvm_ctx;
     if (!tb->llvm_tc) {
-        if (l->use_cache) {
-            if (tb->exec_count++ == l->hot_limit1) {
-                LLVMOrcJITTargetAddress func_addr;
-                char symname[MAX_SYMNAME];
-                fmt_tb_symbol(symname, "tb", tb->pc);
-                if (LLVMOrcLLJITLookup(l->jit, &func_addr, symname) == 0) {
-                    tb->llvm_tc = (void *)func_addr;
-                }
-                fmt_tb_symbol(symname, "fwdptr", tb->pc);
-                if (LLVMOrcLLJITLookup(l->jit, &func_addr, symname) == 0) {
-                    tb->llvm_tc = NULL;
-                }
-
-                fmt_tb_symbol(symname, "tb", tb->pc);
-                qemu_log("%s %s\n", tb->llvm_tc ? "hit" : "miss", symname);
-            }
-            if (!tb->llvm_tc) {
-                return false;
-            }
-        } else {
-            if (tb->exec_count == l->hot_limit1) {
-                g_ptr_array_add(l->hot_tb, tb);
-            }
-            if (tb->exec_count < l->hot_limit2) {
-                tb->exec_count++;
-                return false;
-            }
-            batch_compile(l);
+        if (tb->exec_count == l->hot_limit1) {
+            g_ptr_array_add(l->hot_tb, tb);
         }
+        if (tb->exec_count < l->hot_limit2) {
+            tb->exec_count++;
+            return false;
+        }
+        batch_compile(l);
     }
     /*if (map_pc_item(tb->pc).pc && map_pc_item(tb->pc).pc != tb->pc) {
         qemu_log("pc hash conflit: %lu %lu\n", map_pc_item(tb->pc).pc, tb->pc);
@@ -1417,7 +1453,7 @@ static void init_prologue(TCGLLVMContext *l)
     
     LLVMRunPassManager(l->mpm_O2, l->mod);    
     //dump_module(l->mod);
-    write_module(l->mod, "prologue.ll");
+    write_module(l->mod, TCG_LLVM_CACHE_DIR "/prologue.ll");
     
     tsm = LLVMOrcCreateNewThreadSafeModule(l->mod, l->tsctx);
     check_error(LLVMOrcLLJITAddLLVMIRModule(l->jit, l->jd, tsm));
@@ -1563,18 +1599,20 @@ void tcg_llvm_context_init(TCGContext *s)
     add_absolute_symbol(l, "map_pc", map_pc);
     commit_absolute_symbol(l);
     
-    l->use_cache = 1;
+    const char *cache_file = TCG_LLVM_CACHE_DIR "/cache.o";
+    l->use_cache = (access(cache_file, F_OK) == 0);
+    l->cache_meta = g_hash_table_new(NULL, NULL);
     if (l->use_cache) {
         char *msg = NULL;
         LLVMMemoryBufferRef membuf = NULL;
-        if (LLVMCreateMemoryBufferWithContentsOfFile("tmp.o", &membuf, &msg)) {
-            qemu_log("%s", msg);
+        if (LLVMCreateMemoryBufferWithContentsOfFile(cache_file, &membuf, &msg)) {
+            qemu_log("%s\n", msg);
             LLVMDisposeMessage(msg);
             tcg_abort();
         }
         check_error(LLVMOrcLLJITAddObjectFile(l->jit, l->jd, membuf));
     }
-    qemu_log("init ok!\n");
+    qemu_log("init ok! use_cache=%d\n", l->use_cache);
 }
 
 void tcg_llvm_init(void)

@@ -94,7 +94,10 @@ typedef struct TCGLLVMContext {
     GPtrArray *hot_tb;
     uint64_t hot_limit1, hot_limit2;
 
+    /* Cache */
+#define TCG_LLVM_CACHE_DIR "/tmp/tcgllvm"
     int use_cache;
+    GHashTable *cache_meta;
 } TCGLLVMContext;
 
 void tcg_llvm_serialize_tb(TCGContext *s, TranslationBlock *tb);
