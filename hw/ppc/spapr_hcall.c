@@ -7,7 +7,6 @@
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/error-report.h"
-#include "cpu.h"
 #include "exec/exec-all.h"
 #include "helper_regs.h"
 #include "hw/ppc/spapr.h"
@@ -1395,7 +1394,13 @@ static target_ulong h_set_mode_resource_addr_trans_mode(PowerPCCPU *cpu,
         return H_P4;
     }
 
-    if (mflags == AIL_RESERVED) {
+    if (mflags == 1) {
+        /* AIL=1 is reserved in POWER8/POWER9/POWER10 */
+        return H_UNSUPPORTED_FLAG;
+    }
+
+    if (mflags == 2 && (pcc->insns_flags2 & PPC2_ISA310)) {
+        /* AIL=2 is reserved in POWER10 (ISA v3.1) */
         return H_UNSUPPORTED_FLAG;
     }
 

@@ -65,7 +65,6 @@
 #include "hw/xen/start_info.h"
 #include "ui/qemu-spice.h"
 #include "exec/memory.h"
-#include "exec/address-spaces.h"
 #include "sysemu/arch_init.h"
 #include "qemu/bitmap.h"
 #include "qemu/config-file.h"
@@ -74,7 +73,6 @@
 #include "qemu/cutils.h"
 #include "hw/acpi/acpi.h"
 #include "hw/acpi/cpu_hotplug.h"
-#include "hw/boards.h"
 #include "acpi-build.h"
 #include "hw/mem/pc-dimm.h"
 #include "hw/mem/nvdimm.h"
@@ -95,6 +93,9 @@
 #include "fw_cfg.h"
 #include "trace.h"
 #include CONFIG_DEVICES
+
+GlobalProperty pc_compat_6_0[] = {};
+const size_t pc_compat_6_0_len = G_N_ELEMENTS(pc_compat_6_0);
 
 GlobalProperty pc_compat_5_2[] = {
     { "ICH9-LPC", "x-smi-cpu-hotunplug", "off" },

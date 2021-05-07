@@ -26,7 +26,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
 #include "sysemu/sysemu.h"
@@ -41,7 +40,6 @@
 #include "hw/ppc/spapr_rtas.h"
 #include "hw/ppc/spapr_cpu_core.h"
 #include "hw/ppc/ppc.h"
-#include "hw/boards.h"
 
 #include <libfdt.h>
 #include "hw/ppc/spapr_drc.h"
@@ -51,6 +49,7 @@
 #include "target/ppc/mmu-hash64.h"
 #include "target/ppc/mmu-book3s-v3.h"
 #include "migration/blocker.h"
+#include "helper_regs.h"
 
 static void rtas_display_character(PowerPCCPU *cpu, SpaprMachineState *spapr,
                                    uint32_t token, uint32_t nargs,
@@ -163,6 +162,7 @@ static void rtas_start_cpu(PowerPCCPU *callcpu, SpaprMachineState *spapr,
     cpu_synchronize_state(CPU(newcpu));
 
     env->msr = (1ULL << MSR_SF) | (1ULL << MSR_ME);
+    hreg_compute_hflags(env);
 
     /* Enable Power-saving mode Exit Cause exceptions for the new CPU */
     lpcr = env->spr[SPR_LPCR];

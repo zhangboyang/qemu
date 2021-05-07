@@ -54,7 +54,6 @@
 #include "cpu-models.h"
 #include "hw/core/cpu.h"
 
-#include "hw/boards.h"
 #include "hw/ppc/ppc.h"
 #include "hw/loader.h"
 
@@ -70,7 +69,6 @@
 #include "hw/virtio/virtio-scsi.h"
 #include "hw/virtio/vhost-scsi-common.h"
 
-#include "exec/address-spaces.h"
 #include "exec/ram_addr.h"
 #include "hw/usb.h"
 #include "qemu/config-file.h"
@@ -100,7 +98,7 @@
  *
  * We load our kernel at 4M, leaving space for SLOF initial image
  */
-#define RTAS_MAX_ADDR           0x80000000 /* RTAS must stay below that */
+#define FDT_MAX_ADDR            0x80000000 /* FDT must stay below that */
 #define FW_MAX_SIZE             0x400000
 #define FW_FILE_NAME            "slof.bin"
 #define FW_OVERHEAD             0x2800000
@@ -1617,11 +1615,11 @@ static void spapr_machine_reset(MachineState *machine)
     spapr_clear_pending_events(spapr);
 
     /*
-     * We place the device tree and RTAS just below either the top of the RMA,
+     * We place the device tree just below either the top of the RMA,
      * or just below 2GB, whichever is lower, so that it can be
      * processed with 32-bit real mode code if necessary
      */
-    fdt_addr = MIN(spapr->rma_size, RTAS_MAX_ADDR) - FDT_MAX_SIZE;
+    fdt_addr = MIN(spapr->rma_size, FDT_MAX_ADDR) - FDT_MAX_SIZE;
 
     fdt = spapr_build_fdt(spapr, true, FDT_MAX_SIZE);
 
@@ -2694,7 +2692,7 @@ static void spapr_machine_init(MachineState *machine)
     spapr->rma_size = spapr_rma_size(spapr, &error_fatal);
 
     /* Setup a load limit for the ramdisk leaving room for SLOF and FDT */
-    load_limit = MIN(spapr->rma_size, RTAS_MAX_ADDR) - FW_OVERHEAD;
+    load_limit = MIN(spapr->rma_size, FDT_MAX_ADDR) - FW_OVERHEAD;
 
     /*
      * VSMT must be set in order to be able to compute VCPU ids, ie to
@@ -3777,12 +3775,17 @@ void spapr_core_unplug_request(HotplugHandler *hotplug_dev, DeviceState *dev,
 
     if (!spapr_drc_unplug_requested(drc)) {
         spapr_drc_unplug_request(drc);
-        spapr_hotplug_req_remove_by_index(drc);
-    } else {
-        error_setg(errp, "core-id %d unplug is still pending, %d seconds "
-                   "timeout remaining",
-                   cc->core_id, spapr_drc_unplug_timeout_remaining_sec(drc));
     }
+
+    /*
+     * spapr_hotplug_req_remove_by_index is left unguarded, out of the
+     * "!spapr_drc_unplug_requested" check, to allow for multiple IRQ
+     * pulses removing the same CPU. Otherwise, in an failed hotunplug
+     * attempt (e.g. the kernel will refuse to remove the last online
+     * CPU), we will never attempt it again because unplug_requested
+     * will still be 'true' in that case.
+     */
+    spapr_hotplug_req_remove_by_index(drc);
 }
 
 int spapr_core_dt_populate(SpaprDrc *drc, SpaprMachineState *spapr,
@@ -4482,7 +4485,16 @@ static void spapr_machine_class_init(ObjectClass *oc, void *data)
     mc->init = spapr_machine_init;
     mc->reset = spapr_machine_reset;
     mc->block_default_type = IF_SCSI;
-    mc->max_cpus = 1024;
+
+    /*
+     * Setting max_cpus to INT32_MAX. Both KVM and TCG max_cpus values
+     * should be limited by the host capability instead of hardcoded.
+     * max_cpus for KVM guests will be checked in kvm_init(), and TCG
+     * guests are welcome to have as many CPUs as the host are capable
+     * of emulate.
+     */
+    mc->max_cpus = INT32_MAX;
+
     mc->no_parallel = 1;
     mc->default_boot_order = "";
     mc->default_ram_size = 512 * MiB;
@@ -4600,14 +4612,25 @@ static void spapr_machine_latest_class_options(MachineClass *mc)
     type_init(spapr_machine_register_##suffix)
 
 /*
- * pseries-6.0
+ * pseries-6.1
  */
-static void spapr_machine_6_0_class_options(MachineClass *mc)
+static void spapr_machine_6_1_class_options(MachineClass *mc)
 {
     /* Defaults for the latest behaviour inherited from the base class */
 }
 
-DEFINE_SPAPR_MACHINE(6_0, "6.0", true);
+DEFINE_SPAPR_MACHINE(6_1, "6.1", true);
+
+/*
+ * pseries-6.0
+ */
+static void spapr_machine_6_0_class_options(MachineClass *mc)
+{
+    spapr_machine_6_1_class_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_6_0, hw_compat_6_0_len);
+}
+
+DEFINE_SPAPR_MACHINE(6_0, "6.0", false);
 
 /*
  * pseries-5.2

@@ -404,7 +404,8 @@ F: target/arm/kvm.c
 MIPS KVM CPUs
 M: Huacai Chen <chenhuacai@kernel.org>
 S: Odd Fixes
-F: target/mips/kvm.c
+F: target/mips/kvm*
+F: target/mips/sysemu/
 
 PPC KVM CPUs
 M: David Gibson <david@gibson.dropbear.id.au>
@@ -1026,6 +1027,7 @@ F: include/hw/misc/pca9552*.h
 F: hw/net/ftgmac100.c
 F: include/hw/net/ftgmac100.h
 F: docs/system/arm/aspeed.rst
+F: tests/qtest/*aspeed*
 
 NRF51
 M: Joel Stanley <joel@jms.id.au>
@@ -1363,6 +1365,16 @@ F: hw/rtc/m41t80.c
 F: pc-bios/canyonlands.dt[sb]
 F: pc-bios/u-boot-sam460ex-20100605.bin
 F: roms/u-boot-sam460ex
+
+pegasos2
+M: BALATON Zoltan <balaton@eik.bme.hu>
+R: David Gibson <david@gibson.dropbear.id.au>
+L: qemu-ppc@nongnu.org
+S: Maintained
+F: hw/ppc/pegasos2.c
+F: hw/pci-host/mv64361.c
+F: hw/pci-host/mv643xx.h
+F: include/hw/pci-host/mv64361.h
 
 RISC-V Machines
 ---------------
@@ -1772,6 +1784,7 @@ F: include/hw/scsi/*
 F: hw/scsi/*
 F: tests/qtest/virtio-scsi-test.c
 F: tests/qtest/fuzz-virtio-scsi-test.c
+F: tests/qtest/am53c974-test.c
 T: git https://github.com/bonzini/qemu.git scsi-next
 
 SSI
@@ -2530,6 +2543,12 @@ Benchmark util
 M: Vladimir Sementsov-Ogievskiy <vsementsov@virtuozzo.com>
 S: Maintained
 F: scripts/simplebench/
+
+Transactions helper
+M: Vladimir Sementsov-Ogievskiy <vsementsov@virtuozzo.com>
+S: Maintained
+F: include/qemu/transactions.h
+F: util/transactions.c
 
 QAPI
 M: Markus Armbruster <armbru@redhat.com>
