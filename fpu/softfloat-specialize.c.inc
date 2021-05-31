@@ -103,7 +103,7 @@ static inline bool snan_bit_is_one(float_status *status)
 {
 #if defined(TARGET_MIPS)
     return status->snan_bit_is_one;
-#elif defined(TARGET_HPPA) || defined(TARGET_UNICORE32) || defined(TARGET_SH4)
+#elif defined(TARGET_HPPA) || defined(TARGET_SH4)
     return 1;
 #else
     return 0;
@@ -129,7 +129,7 @@ static bool parts_is_snan_frac(uint64_t frac, float_status *status)
 | The pattern for a default generated deconstructed floating-point NaN.
 *----------------------------------------------------------------------------*/
 
-static FloatParts parts_default_nan(float_status *status)
+static void parts64_default_nan(FloatParts64 *p, float_status *status)
 {
     bool sign = 0;
     uint64_t frac;
@@ -149,11 +149,10 @@ static FloatParts parts_default_nan(float_status *status)
     sign = 1;
     frac = ~0ULL;
 #else
-    /* This case is true for Alpha, ARM, MIPS, OpenRISC, PPC, RISC-V,
-     * S390, SH4, TriCore, and Xtensa.  I cannot find documentation
-     * for Unicore32; the choice from the original commit is unchanged.
-     * Our other supported targets, CRIS, LM32, Moxie, Nios2, and Tile,
-     * do not have floating-point.
+    /*
+     * This case is true for Alpha, ARM, MIPS, OpenRISC, PPC, RISC-V,
+     * S390, SH4, TriCore, and Xtensa.  Our other supported targets,
+     * CRIS, Nios2, and Tile, do not have floating-point.
      */
     if (snan_bit_is_one(status)) {
         /* set all bits other than msb */
@@ -164,11 +163,30 @@ static FloatParts parts_default_nan(float_status *status)
     }
 #endif
 
-    return (FloatParts) {
+    *p = (FloatParts64) {
         .cls = float_class_qnan,
         .sign = sign,
         .exp = INT_MAX,
         .frac = frac
+    };
+}
+
+static void parts128_default_nan(FloatParts128 *p, float_status *status)
+{
+    /*
+     * Extrapolate from the choices made by parts64_default_nan to fill
+     * in the quad-floating format.  If the low bit is set, assume we
+     * want to set all non-snan bits.
+     */
+    FloatParts64 p64;
+    parts64_default_nan(&p64, status);
+
+    *p = (FloatParts128) {
+        .cls = float_class_qnan,
+        .sign = p64.sign,
+        .exp = INT_MAX,
+        .frac_hi = p64.frac,
+        .frac_lo = -(p64.frac & 1)
     };
 }
 
@@ -177,21 +195,31 @@ static FloatParts parts_default_nan(float_status *status)
 | floating-point parts.
 *----------------------------------------------------------------------------*/
 
-static FloatParts parts_silence_nan(FloatParts a, float_status *status)
+static uint64_t parts_silence_nan_frac(uint64_t frac, float_status *status)
 {
     g_assert(!no_signaling_nans(status));
-#if defined(TARGET_HPPA)
-    a.frac &= ~(1ULL << (DECOMPOSED_BINARY_POINT - 1));
-    a.frac |= 1ULL << (DECOMPOSED_BINARY_POINT - 2);
-#else
+    g_assert(!status->default_nan_mode);
+
+    /* The only snan_bit_is_one target without default_nan_mode is HPPA. */
     if (snan_bit_is_one(status)) {
-        return parts_default_nan(status);
+        frac &= ~(1ULL << (DECOMPOSED_BINARY_POINT - 1));
+        frac |= 1ULL << (DECOMPOSED_BINARY_POINT - 2);
     } else {
-        a.frac |= 1ULL << (DECOMPOSED_BINARY_POINT - 1);
+        frac |= 1ULL << (DECOMPOSED_BINARY_POINT - 1);
     }
-#endif
-    a.cls = float_class_qnan;
-    return a;
+    return frac;
+}
+
+static void parts64_silence_nan(FloatParts64 *p, float_status *status)
+{
+    p->frac = parts_silence_nan_frac(p->frac, status);
+    p->cls = float_class_qnan;
+}
+
+static void parts128_silence_nan(FloatParts128 *p, float_status *status)
+{
+    p->frac_hi = parts_silence_nan_frac(p->frac_hi, status);
+    p->cls = float_class_qnan;
 }
 
 /*----------------------------------------------------------------------------
@@ -227,18 +255,6 @@ floatx80 floatx80_default_nan(float_status *status)
 
 const floatx80 floatx80_infinity
     = make_floatx80_init(floatx80_infinity_high, floatx80_infinity_low);
-
-/*----------------------------------------------------------------------------
-| Raises the exceptions specified by `flags'.  Floating-point traps can be
-| defined here if desired.  It is currently not possible for such a trap
-| to substitute a result value.  If traps are not implemented, this routine
-| should be simply `float_exception_flags |= flags;'.
-*----------------------------------------------------------------------------*/
-
-void float_raise(uint8_t flags, float_status *status)
-{
-    status->float_exception_flags |= flags;
-}
 
 /*----------------------------------------------------------------------------
 | Internal canonical NaN format.
@@ -627,6 +643,12 @@ static int pickNaNMulAdd(FloatClass a_cls, FloatClass b_cls, FloatClass c_cls,
     } else {
         return 1;
     }
+#elif defined(TARGET_RISCV)
+    /* For RISC-V, InvalidOp is set when multiplicands are Inf and zero */
+    if (infzero) {
+        float_raise(float_flag_invalid, status);
+    }
+    return 3; /* default NaN */
 #elif defined(TARGET_XTENSA)
     /*
      * For Xtensa, the (inf,zero,nan) case sets InvalidOp and returns
@@ -1061,25 +1083,6 @@ bool float128_is_signaling_nan(float128 a, float_status *status)
         } else {
             return (((a.high >> 47) & 0xFFFF) == 0xFFFE)
                 && (a.low || (a.high & UINT64_C(0x00007FFFFFFFFFFF)));
-        }
-    }
-}
-
-/*----------------------------------------------------------------------------
-| Returns a quiet NaN from a signalling NaN for the quadruple-precision
-| floating point value `a'.
-*----------------------------------------------------------------------------*/
-
-float128 float128_silence_nan(float128 a, float_status *status)
-{
-    if (no_signaling_nans(status)) {
-        g_assert_not_reached();
-    } else {
-        if (snan_bit_is_one(status)) {
-            return float128_default_nan(status);
-        } else {
-            a.high |= UINT64_C(0x0000800000000000);
-            return a;
         }
     }
 }

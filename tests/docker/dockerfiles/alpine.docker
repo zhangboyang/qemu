@@ -9,6 +9,7 @@ ENV PACKAGES \
 	alsa-lib-dev \
 	bash \
 	binutils \
+	ccache \
 	coreutils \
 	curl-dev \
 	g++ \
@@ -19,6 +20,7 @@ ENV PACKAGES \
 	gnutls-dev \
 	gtk+3.0-dev \
 	libaio-dev \
+	libbpf-dev \
 	libcap-ng-dev \
 	libjpeg-turbo-dev \
 	libnfs-dev \
@@ -39,6 +41,7 @@ ENV PACKAGES \
 	pulseaudio-dev \
 	python3 \
 	py3-sphinx \
+	py3-sphinx_rtd_theme \
 	shadow \
 	snappy-dev \
 	spice-dev \

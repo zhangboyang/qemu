@@ -50,7 +50,7 @@ typedef struct BlockCopyCallState {
     /* State */
     int ret;
     bool finished;
-    QemuCoSleepState *sleep_state;
+    QemuCoSleep sleep;
     bool cancelled;
 
     /* OUT parameters */
@@ -230,6 +230,7 @@ void block_copy_state_free(BlockCopyState *s)
         return;
     }
 
+    ratelimit_destroy(&s->rate_limit);
     bdrv_release_dirty_bitmap(s->copy_bitmap);
     shres_destroy(s->mem);
     g_free(s);
@@ -289,6 +290,7 @@ BlockCopyState *block_copy_state_new(BdrvChild *source, BdrvChild *target,
         s->copy_size = MAX(s->cluster_size, BLOCK_COPY_MAX_BUFFER);
     }
 
+    ratelimit_init(&s->rate_limit);
     QLIST_INIT(&s->tasks);
     QLIST_INIT(&s->calls);
 
@@ -623,8 +625,8 @@ block_copy_dirty_clusters(BlockCopyCallState *call_state)
                 if (ns > 0) {
                     block_copy_task_end(task, -EAGAIN);
                     g_free(task);
-                    qemu_co_sleep_ns_wakeable(QEMU_CLOCK_REALTIME, ns,
-                                              &call_state->sleep_state);
+                    qemu_co_sleep_ns_wakeable(&call_state->sleep,
+                                              QEMU_CLOCK_REALTIME, ns);
                     continue;
                 }
             }
@@ -672,9 +674,7 @@ out:
 
 void block_copy_kick(BlockCopyCallState *call_state)
 {
-    if (call_state->sleep_state) {
-        qemu_co_sleep_wake(call_state->sleep_state);
-    }
+    qemu_co_sleep_wake(&call_state->sleep);
 }
 
 /*
