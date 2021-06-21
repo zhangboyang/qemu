@@ -224,6 +224,8 @@ typedef enum X86Seg {
 #define CR0_NE_MASK  (1U << 5)
 #define CR0_WP_MASK  (1U << 16)
 #define CR0_AM_MASK  (1U << 18)
+#define CR0_NW_MASK  (1U << 29)
+#define CR0_CD_MASK  (1U << 30)
 #define CR0_PG_MASK  (1U << 31)
 
 #define CR4_VME_MASK  (1U << 0)
@@ -531,11 +533,6 @@ typedef enum FeatureWord {
     FEAT_C000_0001_EDX, /* CPUID[C000_0001].EDX */
     FEAT_KVM,           /* CPUID[4000_0001].EAX (KVM_CPUID_FEATURES) */
     FEAT_KVM_HINTS,     /* CPUID[4000_0001].EDX */
-    FEAT_HYPERV_EAX,    /* CPUID[4000_0003].EAX */
-    FEAT_HYPERV_EBX,    /* CPUID[4000_0003].EBX */
-    FEAT_HYPERV_EDX,    /* CPUID[4000_0003].EDX */
-    FEAT_HV_RECOMM_EAX, /* CPUID[4000_0004].EAX */
-    FEAT_HV_NESTED_EAX, /* CPUID[4000_000A].EAX */
     FEAT_SVM,           /* CPUID[8000_000A].EDX */
     FEAT_XSAVE,         /* CPUID[EAX=0xd,ECX=1].EAX */
     FEAT_6_EAX,         /* CPUID[6].EAX */
@@ -1699,6 +1696,7 @@ struct X86CPU {
     uint32_t hyperv_interface_id[4];
     uint32_t hyperv_version_id[4];
     uint32_t hyperv_limits[3];
+    uint32_t hyperv_nested[4];
 
     bool check_cpuid;
     bool enforce_cpuid;
@@ -2153,9 +2151,13 @@ static inline void
 cpu_svm_check_intercept_param(CPUX86State *env1, uint32_t type,
                               uint64_t param, uintptr_t retaddr)
 { /* no-op */ }
+static inline bool
+cpu_svm_has_intercept(CPUX86State *env, uint32_t type)
+{ return false; }
 #else
 void cpu_svm_check_intercept_param(CPUX86State *env1, uint32_t type,
                                    uint64_t param, uintptr_t retaddr);
+bool cpu_svm_has_intercept(CPUX86State *env, uint32_t type);
 #endif
 
 /* apic.c */
