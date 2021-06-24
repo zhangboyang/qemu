@@ -9,7 +9,14 @@ tcg_ss.add(files(
   'tcg-op-gvec.c',
   'tcg-op-vec.c',
 ))
-tcg_ss.add(when: 'CONFIG_TCG_INTERPRETER', if_true: files('tci.c'))
+
+if get_option('tcg_interpreter')
+  libffi = dependency('libffi', version: '>=3.0', required: true,
+                      method: 'pkg-config', kwargs: static_kwargs)
+  specific_ss.add(libffi)
+  specific_ss.add(files('tci.c'))
+endif
+
 tcg_ss.add(when: 'CONFIG_TCG_LLVM', if_true: files('tcg-llvm.c', 'tcg-llvm-helper.cpp'))
 
 specific_ss.add_all(when: 'CONFIG_TCG', if_true: tcg_ss)

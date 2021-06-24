@@ -12,6 +12,7 @@
 #include "exec/exec-all.h"
 #include "exec/log.h"
 #include "tcg/tcg.h"
+#include "tcg/tcg-internal.h"
 #include "tcg/tcg-llvm.h"
 
 #include <llvm-c/Analysis.h>
