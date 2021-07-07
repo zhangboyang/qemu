@@ -127,6 +127,8 @@ static void bdrv_merge_limits(BlockLimits *dst, const BlockLimits *src)
 {
     dst->opt_transfer = MAX(dst->opt_transfer, src->opt_transfer);
     dst->max_transfer = MIN_NON_ZERO(dst->max_transfer, src->max_transfer);
+    dst->max_hw_transfer = MIN_NON_ZERO(dst->max_hw_transfer,
+                                        src->max_hw_transfer);
     dst->opt_mem_alignment = MAX(dst->opt_mem_alignment,
                                  src->opt_mem_alignment);
     dst->min_mem_alignment = MAX(dst->min_mem_alignment,
@@ -3390,6 +3392,11 @@ int coroutine_fn bdrv_co_truncate(BdrvChild *child, int64_t offset, bool exact,
         return old_size;
     }
 
+    if (bdrv_is_read_only(bs)) {
+        error_setg(errp, "Image is read-only");
+        return -EACCES;
+    }
+
     if (offset > old_size) {
         new_bytes = offset - old_size;
     } else {
@@ -3405,11 +3412,6 @@ int coroutine_fn bdrv_co_truncate(BdrvChild *child, int64_t offset, bool exact,
      * concurrently or they might be overwritten by preallocation. */
     if (new_bytes) {
         bdrv_make_request_serialising(&req, 1);
-    }
-    if (bdrv_is_read_only(bs)) {
-        error_setg(errp, "Image is read-only");
-        ret = -EACCES;
-        goto out;
     }
     ret = bdrv_co_write_req_prepare(child, offset - new_bytes, new_bytes, &req,
                                     0);

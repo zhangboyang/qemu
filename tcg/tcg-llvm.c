@@ -1572,7 +1572,7 @@ void tcg_llvm_context_init(TCGContext *s)
     l->fn_qemu_st = g_ptr_array_new();
     l->fn_dummy = g_ptr_array_new();
 
-    l->tb_callconv = 10; /* GHC-CC */
+    l->tb_callconv = LLVMFastCallConv;
     l->nb_fastreg = 0;
 
     l->regmap = g_malloc_n(l->nb_fastreg, sizeof(*l->regmap));
