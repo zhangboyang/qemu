@@ -11,26 +11,24 @@ or Hypervisor.Framework.
 
    quickstart
    invocation
+   device-emulation
    keys
    mux-chardev
    monitor
    images
-   net
    virtio-net-failover
-   usb
-   nvme
-   ivshmem
    linuxboot
    generic-loader
    guest-loader
+   barrier
    vnc-security
    tls
    secrets
    authz
    gdb
    managed-startup
+   bootindex
    cpu-hotplug
-   virtio-pmem
    pr-manager
    targets
    security

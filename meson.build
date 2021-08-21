@@ -824,7 +824,7 @@ endif
 
 gnutls = not_found
 gnutls_crypto = not_found
-if not get_option('gnutls').auto() or have_system
+if get_option('gnutls').enabled() or (get_option('gnutls').auto() and have_system)
   # For general TLS support our min gnutls matches
   # that implied by our platform support matrix
   #
@@ -930,7 +930,7 @@ vnc = not_found
 png = not_found
 jpeg = not_found
 sasl = not_found
-if get_option('vnc').enabled()
+if not get_option('vnc').disabled()
   vnc = declare_dependency() # dummy dependency
   png = dependency('libpng', required: get_option('vnc_png'),
                    method: 'pkg-config', kwargs: static_kwargs)
@@ -1824,6 +1824,8 @@ if have_system
     slirp_deps = []
     if targetos == 'windows'
       slirp_deps = cc.find_library('iphlpapi')
+    elif targetos == 'darwin'
+      slirp_deps = cc.find_library('resolv')
     endif
     slirp_conf = configuration_data()
     slirp_conf.set('SLIRP_MAJOR_VERSION', meson.project_version().split('.')[0])
@@ -2335,9 +2337,9 @@ foreach d, list : modules
         # https://github.com/mesonbuild/meson/pull/8900
         modinfo_files += custom_target(d + '-' + m + '.modinfo',
                                        output: d + '-' + m + '.modinfo',
-                                       input: module_ss.sources(),
+                                       input: module_ss.sources() + genh,
                                        capture: true,
-                                       command: [modinfo_collect, '@INPUT@'])
+                                       command: [modinfo_collect, module_ss.sources()])
       endif
     else
       if d == 'block'
@@ -2373,9 +2375,9 @@ foreach d, list : target_modules
             # FIXME: Should use sl.extract_all_objects(recursive: true) too.
             modinfo_files += custom_target(module_name + '.modinfo',
                                            output: module_name + '.modinfo',
-                                           input: target_module_ss.sources(),
+                                           input: target_module_ss.sources() + genh,
                                            capture: true,
-                                           command: [modinfo_collect, '--target', target, '@INPUT@'])
+                                           command: [modinfo_collect, '--target', target, target_module_ss.sources()])
           endif
         endif
       endforeach
@@ -2997,6 +2999,7 @@ summary_info += {'coroutine pool':    config_host['CONFIG_COROUTINE_POOL'] == '1
 if have_block
   summary_info += {'Block whitelist (rw)': config_host['CONFIG_BDRV_RW_WHITELIST']}
   summary_info += {'Block whitelist (ro)': config_host['CONFIG_BDRV_RO_WHITELIST']}
+  summary_info += {'Use block whitelist in tools': config_host.has_key('CONFIG_BDRV_WHITELIST_TOOLS')}
   summary_info += {'VirtFS support':    have_virtfs}
   summary_info += {'build virtiofs daemon': have_virtiofsd}
   summary_info += {'Live block migration': config_host.has_key('CONFIG_LIVE_BLOCK_MIGRATION')}

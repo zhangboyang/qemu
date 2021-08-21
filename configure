@@ -243,6 +243,7 @@ cross_prefix=""
 audio_drv_list=""
 block_drv_rw_whitelist=""
 block_drv_ro_whitelist=""
+block_drv_whitelist_tools="no"
 host_cc="cc"
 audio_win_int=""
 libs_qga=""
@@ -304,14 +305,14 @@ virtiofsd="auto"
 virtfs="auto"
 libudev="auto"
 mpath="auto"
-vnc="enabled"
+vnc="auto"
 sparse="auto"
 vde="$default_feature"
 vnc_sasl="auto"
 vnc_jpeg="auto"
 vnc_png="auto"
 xkbcommon="auto"
-xen="$default_feature"
+xen=${default_feature:+disabled}
 xen_ctrl_version="$default_feature"
 xen_pci_passthrough="auto"
 linux_aio="$default_feature"
@@ -321,6 +322,7 @@ attr="auto"
 xfs="$default_feature"
 tcg="enabled"
 membarrier="$default_feature"
+vhost_kernel="$default_feature"
 vhost_net="$default_feature"
 vhost_crypto="$default_feature"
 vhost_scsi="$default_feature"
@@ -328,6 +330,7 @@ vhost_vsock="$default_feature"
 vhost_user="no"
 vhost_user_blk_server="auto"
 vhost_user_fs="$default_feature"
+vhost_vdpa="$default_feature"
 bpf="auto"
 kvm="auto"
 hax="auto"
@@ -768,7 +771,8 @@ SunOS)
 ;;
 Haiku)
   haiku="yes"
-  QEMU_CFLAGS="-DB_USE_POSITIVE_POSIX_ERRORS -D_BSD_SOURCE $QEMU_CFLAGS"
+  pie="no"
+  QEMU_CFLAGS="-DB_USE_POSITIVE_POSIX_ERRORS -D_BSD_SOURCE -fPIC $QEMU_CFLAGS"
 ;;
 Linux)
   audio_drv_list="try-pa oss"
@@ -1016,6 +1020,10 @@ for opt do
   --block-drv-rw-whitelist=*|--block-drv-whitelist=*) block_drv_rw_whitelist=$(echo "$optarg" | sed -e 's/,/ /g')
   ;;
   --block-drv-ro-whitelist=*) block_drv_ro_whitelist=$(echo "$optarg" | sed -e 's/,/ /g')
+  ;;
+  --enable-block-drv-whitelist-in-tools) block_drv_whitelist_tools="yes"
+  ;;
+  --disable-block-drv-whitelist-in-tools) block_drv_whitelist_tools="no"
   ;;
   --enable-debug-tcg) debug_tcg="yes"
   ;;
@@ -1805,10 +1813,12 @@ Advanced options (experts only):
   --block-drv-whitelist=L  Same as --block-drv-rw-whitelist=L
   --block-drv-rw-whitelist=L
                            set block driver read-write whitelist
-                           (affects only QEMU, not qemu-img)
+                           (by default affects only QEMU, not tools like qemu-img)
   --block-drv-ro-whitelist=L
                            set block driver read-only whitelist
-                           (affects only QEMU, not qemu-img)
+                           (by default affects only QEMU, not tools like qemu-img)
+  --enable-block-drv-whitelist-in-tools
+                           use block whitelist also in tools instead of only QEMU
   --enable-trace-backends=B Set trace backend
                            Available backends: $trace_backend_list
   --with-trace-file=NAME   Full PATH,NAME of file to store traces
@@ -3272,18 +3282,6 @@ if ! compile_prog "$glib_cflags" "$glib_libs" ; then
 	       "build target"
 fi
 
-# Silence clang 3.5.0 warnings about glib attribute __alloc_size__ usage
-cat > $TMPC << EOF
-#include <glib.h>
-int main(void) { return 0; }
-EOF
-if ! compile_prog "$glib_cflags -Werror" "$glib_libs" ; then
-    if cc_has_warning_flag "-Wno-unknown-attributes"; then
-        glib_cflags="-Wno-unknown-attributes $glib_cflags"
-        CONFIGURE_CFLAGS="-Wno-unknown-attributes $CONFIGURE_CFLAGS"
-    fi
-fi
-
 # Silence clang warnings triggered by glib < 2.57.2
 cat > $TMPC << EOF
 #include <glib.h>
@@ -3890,7 +3888,7 @@ static int bar(void *a) {
 }
 int main(int argc, char *argv[]) { return bar(argv[0]); }
 EOF
-  if compile_object "" ; then
+  if compile_object "-Werror" ; then
     avx2_opt="yes"
   else
     avx2_opt="no"
@@ -3920,7 +3918,7 @@ int main(int argc, char *argv[])
 	return bar(argv[0]);
 }
 EOF
-  if ! compile_object "" ; then
+  if ! compile_object "-Werror" ; then
     avx512f_opt="no"
   fi
 else
@@ -3990,18 +3988,11 @@ cat > $TMPC << EOF
 int main(void)
 {
   uint64_t x = 0, y = 0;
-#ifdef __ATOMIC_RELAXED
   y = __atomic_load_n(&x, __ATOMIC_RELAXED);
   __atomic_store_n(&x, y, __ATOMIC_RELAXED);
   __atomic_compare_exchange_n(&x, &y, x, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
   __atomic_exchange_n(&x, y, __ATOMIC_RELAXED);
   __atomic_fetch_add(&x, y, __ATOMIC_RELAXED);
-#else
-  typedef char is_host64[sizeof(void *) >= sizeof(uint64_t) ? 1 : -1];
-  __sync_lock_test_and_set(&x, y);
-  __sync_val_compare_and_swap(&x, y, 0);
-  __sync_fetch_and_add(&x, y);
-#endif
   return 0;
 }
 EOF
@@ -4589,6 +4580,9 @@ if test "$audio_win_int" = "yes" ; then
 fi
 echo "CONFIG_BDRV_RW_WHITELIST=$block_drv_rw_whitelist" >> $config_host_mak
 echo "CONFIG_BDRV_RO_WHITELIST=$block_drv_ro_whitelist" >> $config_host_mak
+if test "$block_drv_whitelist_tools" = "yes" ; then
+  echo "CONFIG_BDRV_WHITELIST_TOOLS=y" >> $config_host_mak
+fi
 if test "$xfs" = "yes" ; then
   echo "CONFIG_XFS=y" >> $config_host_mak
 fi
@@ -5119,12 +5113,10 @@ if test "$skip_meson" = no; then
   echo "[properties]" >> $cross
 
   # unroll any custom device configs
-  if test -n "$device_archs"; then
-      for a in $device_archs; do
-          eval "c=\$devices_${a}"
-          echo "${a}-softmmu = '$c'" >> $cross
-      done
-  fi
+  for a in $device_archs; do
+      eval "c=\$devices_${a}"
+      echo "${a}-softmmu = '$c'" >> $cross
+  done
 
   test -z "$cxx" && echo "link_language = 'c'" >> $cross
   echo "[built-in options]" >> $cross
@@ -5227,7 +5219,7 @@ if test "$skip_meson" = no; then
         -Ddocs=$docs -Dsphinx_build=$sphinx_build -Dinstall_blobs=$blobs \
         -Dvhost_user_blk_server=$vhost_user_blk_server -Dmultiprocess=$multiprocess \
         -Dfuse=$fuse -Dfuse_lseek=$fuse_lseek -Dguest_agent_msi=$guest_agent_msi -Dbpf=$bpf\
-        $(if test "$default_features" = no; then echo "-Dauto_features=disabled"; fi) \
+        $(if test "$default_feature" = no; then echo "-Dauto_features=disabled"; fi) \
 	-Dtcg_interpreter=$tcg_interpreter \
         $cross_arg \
         "$PWD" "$source_path"
@@ -5248,7 +5240,7 @@ fi
 
 if test -n "${deprecated_features}"; then
     echo "Warning, deprecated features enabled."
-    echo "Please see docs/system/deprecated.rst"
+    echo "Please see docs/about/deprecated.rst"
     echo "  features: ${deprecated_features}"
 fi
 

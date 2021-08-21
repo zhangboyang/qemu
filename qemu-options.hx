@@ -98,28 +98,32 @@ SRST
         Enables or disables ACPI Heterogeneous Memory Attribute Table
         (HMAT) support. The default is off.
 
-     ``memory-backend='id'``
+    ``memory-backend='id'``
         An alternative to legacy ``-mem-path`` and ``mem-prealloc`` options.
         Allows to use a memory backend as main RAM.
 
         For example:
         ::
-        -object memory-backend-file,id=pc.ram,size=512M,mem-path=/hugetlbfs,prealloc=on,share=on
-        -machine memory-backend=pc.ram
-        -m 512M
+
+            -object memory-backend-file,id=pc.ram,size=512M,mem-path=/hugetlbfs,prealloc=on,share=on
+            -machine memory-backend=pc.ram
+            -m 512M
 
         Migration compatibility note:
-        a) as backend id one shall use value of 'default-ram-id', advertised by
-        machine type (available via ``query-machines`` QMP command), if migration
-        to/from old QEMU (<5.0) is expected.
-        b) for machine types 4.0 and older, user shall
-        use ``x-use-canonical-path-for-ramblock-id=off`` backend option
-        if migration to/from old QEMU (<5.0) is expected.
+
+        * as backend id one shall use value of 'default-ram-id', advertised by
+          machine type (available via ``query-machines`` QMP command), if migration
+          to/from old QEMU (<5.0) is expected.
+        * for machine types 4.0 and older, user shall
+          use ``x-use-canonical-path-for-ramblock-id=off`` backend option
+          if migration to/from old QEMU (<5.0) is expected.
+
         For example:
         ::
-        -object memory-backend-ram,id=pc.ram,size=512M,x-use-canonical-path-for-ramblock-id=off
-        -machine memory-backend=pc.ram
-        -m 512M
+
+            -object memory-backend-ram,id=pc.ram,size=512M,x-use-canonical-path-for-ramblock-id=off
+            -machine memory-backend=pc.ram
+            -m 512M
 ERST
 
 HXCOMM Deprecated by -machine
@@ -5301,7 +5305,7 @@ SRST
 
             CN=laptop.example.com,O=Example Home,L=London,ST=London,C=GB
 
-    ``-object iothread,id=id,poll-max-ns=poll-max-ns,poll-grow=poll-grow,poll-shrink=poll-shrink``
+    ``-object iothread,id=id,poll-max-ns=poll-max-ns,poll-grow=poll-grow,poll-shrink=poll-shrink,aio-max-batch=aio-max-batch``
         Creates a dedicated event loop thread that devices can be
         assigned to. This is known as an IOThread. By default device
         emulation happens in vCPU threads or the main event loop thread.
@@ -5337,7 +5341,11 @@ SRST
         the polling time when the algorithm detects it is spending too
         long polling without encountering events.
 
-        The polling parameters can be modified at run-time using the
+        The ``aio-max-batch`` parameter is the maximum number of requests
+        in a batch for the AIO engine, 0 means that the engine will use
+        its default.
+
+        The IOThread parameters can be modified at run-time using the
         ``qom-set`` command (where ``iothread1`` is the IOThread's
         ``id``):
 
