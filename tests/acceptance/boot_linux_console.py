@@ -475,7 +475,7 @@ class BootLinuxConsole(LinuxKernelTest):
     def test_arm_raspi2_uart0(self):
         """
         :avocado: tags=arch:arm
-        :avocado: tags=machine:raspi2
+        :avocado: tags=machine:raspi2b
         :avocado: tags=device:pl011
         :avocado: tags=accel:tcg
         """
@@ -484,7 +484,7 @@ class BootLinuxConsole(LinuxKernelTest):
     def test_arm_raspi2_initrd(self):
         """
         :avocado: tags=arch:arm
-        :avocado: tags=machine:raspi2
+        :avocado: tags=machine:raspi2b
         """
         deb_url = ('http://archive.raspberrypi.org/debian/'
                    'pool/main/r/raspberrypi-firmware/'
@@ -971,7 +971,7 @@ class BootLinuxConsole(LinuxKernelTest):
     def test_aarch64_raspi3_atf(self):
         """
         :avocado: tags=arch:aarch64
-        :avocado: tags=machine:raspi3
+        :avocado: tags=machine:raspi3b
         :avocado: tags=cpu:cortex-a53
         :avocado: tags=device:pl011
         :avocado: tags=atf
@@ -1175,6 +1175,41 @@ class BootLinuxConsole(LinuxKernelTest):
         """
         tar_hash = '6951d86d644b302898da2fd701739c9406527fe1'
         self.do_test_advcal_2018('19', tar_hash, 'uImage')
+
+    def do_test_ppc64_powernv(self, proc):
+        images_url = ('https://github.com/open-power/op-build/releases/download/v2.7/')
+
+        kernel_url = images_url + 'zImage.epapr'
+        kernel_hash = '0ab237df661727e5392cee97460e8674057a883c5f74381a128fa772588d45cd'
+        kernel_path = self.fetch_asset(kernel_url, asset_hash=kernel_hash,
+                                       algorithm='sha256')
+        self.vm.set_console()
+        self.vm.add_args('-kernel', kernel_path,
+                         '-append', 'console=tty0 console=hvc0',
+                         '-device', 'pcie-pci-bridge,id=bridge1,bus=pcie.1,addr=0x0',
+                         '-device', 'nvme,bus=pcie.2,addr=0x0,serial=1234',
+                         '-device', 'e1000e,bus=bridge1,addr=0x3',
+                         '-device', 'nec-usb-xhci,bus=bridge1,addr=0x2')
+        self.vm.launch()
+
+        self.wait_for_console_pattern("CPU: " + proc + " generation processor")
+        self.wait_for_console_pattern("zImage starting: loaded")
+        self.wait_for_console_pattern("Run /init as init process")
+        self.wait_for_console_pattern("Creating 1 MTD partitions")
+
+    def test_ppc_powernv8(self):
+        """
+        :avocado: tags=arch:ppc64
+        :avocado: tags=machine:powernv8
+        """
+        self.do_test_ppc64_powernv('P8')
+
+    def test_ppc_powernv9(self):
+        """
+        :avocado: tags=arch:ppc64
+        :avocado: tags=machine:powernv9
+        """
+        self.do_test_ppc64_powernv('P9')
 
     def test_ppc_g3beige(self):
         """

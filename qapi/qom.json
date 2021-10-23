@@ -618,7 +618,7 @@
   'data': { '*align': 'size',
             '*discard-data': 'bool',
             'mem-path': 'str',
-            '*pmem': { 'type': 'bool', 'if': 'defined(CONFIG_LIBPMEM)' },
+            '*pmem': { 'type': 'bool', 'if': 'CONFIG_LIBPMEM' },
             '*readonly': 'bool' } }
 
 ##
@@ -646,6 +646,23 @@
   'data': { '*hugetlb': 'bool',
             '*hugetlbsize': 'size',
             '*seal': 'bool' } }
+
+##
+# @MemoryBackendEpcProperties:
+#
+# Properties for memory-backend-epc objects.
+#
+# The @share boolean option is true by default with epc
+#
+# The @merge boolean option is false by default with epc
+#
+# The @dump boolean option is false by default with epc
+#
+# Since: 6.2
+##
+{ 'struct': 'MemoryBackendEpcProperties',
+  'base': 'MemoryBackendProperties',
+  'data': {} }
 
 ##
 # @PrManagerHelperProperties:
@@ -777,12 +794,13 @@
     'authz-pam',
     'authz-simple',
     'can-bus',
-    'can-host-socketcan',
+    { 'name': 'can-host-socketcan',
+      'if': 'CONFIG_LINUX' },
     'colo-compare',
     'cryptodev-backend',
     'cryptodev-backend-builtin',
     { 'name': 'cryptodev-vhost-user',
-      'if': 'defined(CONFIG_VHOST_CRYPTO)' },
+      'if': 'CONFIG_VHOST_CRYPTO' },
     'dbus-vmstate',
     'filter-buffer',
     'filter-dump',
@@ -791,20 +809,26 @@
     'filter-replay',
     'filter-rewriter',
     'input-barrier',
-    'input-linux',
+    { 'name': 'input-linux',
+      'if': 'CONFIG_LINUX' },
     'iothread',
+    { 'name': 'memory-backend-epc',
+      'if': 'CONFIG_LINUX' },
     'memory-backend-file',
     { 'name': 'memory-backend-memfd',
-      'if': 'defined(CONFIG_LINUX)' },
+      'if': 'CONFIG_LINUX' },
     'memory-backend-ram',
     'pef-guest',
-    'pr-manager-helper',
+    { 'name': 'pr-manager-helper',
+      'if': 'CONFIG_LINUX' },
     'qtest',
     'rng-builtin',
     'rng-egd',
-    'rng-random',
+    { 'name': 'rng-random',
+      'if': 'CONFIG_POSIX' },
     'secret',
-    'secret_keyring',
+    { 'name': 'secret_keyring',
+      'if': 'CONFIG_SECRET_KEYRING' },
     'sev-guest',
     's390-pv-guest',
     'throttle-group',
@@ -835,12 +859,13 @@
       'authz-listfile':             'AuthZListFileProperties',
       'authz-pam':                  'AuthZPAMProperties',
       'authz-simple':               'AuthZSimpleProperties',
-      'can-host-socketcan':         'CanHostSocketcanProperties',
+      'can-host-socketcan':         { 'type': 'CanHostSocketcanProperties',
+                                      'if': 'CONFIG_LINUX' },
       'colo-compare':               'ColoCompareProperties',
       'cryptodev-backend':          'CryptodevBackendProperties',
       'cryptodev-backend-builtin':  'CryptodevBackendProperties',
       'cryptodev-vhost-user':       { 'type': 'CryptodevVhostUserProperties',
-                                      'if': 'defined(CONFIG_VHOST_CRYPTO)' },
+                                      'if': 'CONFIG_VHOST_CRYPTO' },
       'dbus-vmstate':               'DBusVMStateProperties',
       'filter-buffer':              'FilterBufferProperties',
       'filter-dump':                'FilterDumpProperties',
@@ -849,19 +874,25 @@
       'filter-replay':              'NetfilterProperties',
       'filter-rewriter':            'FilterRewriterProperties',
       'input-barrier':              'InputBarrierProperties',
-      'input-linux':                'InputLinuxProperties',
+      'input-linux':                { 'type': 'InputLinuxProperties',
+                                      'if': 'CONFIG_LINUX' },
       'iothread':                   'IothreadProperties',
+      'memory-backend-epc':         { 'type': 'MemoryBackendEpcProperties',
+                                      'if': 'CONFIG_LINUX' },
       'memory-backend-file':        'MemoryBackendFileProperties',
       'memory-backend-memfd':       { 'type': 'MemoryBackendMemfdProperties',
-                                      'if': 'defined(CONFIG_LINUX)' },
+                                      'if': 'CONFIG_LINUX' },
       'memory-backend-ram':         'MemoryBackendProperties',
-      'pr-manager-helper':          'PrManagerHelperProperties',
+      'pr-manager-helper':          { 'type': 'PrManagerHelperProperties',
+                                      'if': 'CONFIG_LINUX' },
       'qtest':                      'QtestProperties',
       'rng-builtin':                'RngProperties',
       'rng-egd':                    'RngEgdProperties',
-      'rng-random':                 'RngRandomProperties',
+      'rng-random':                 { 'type': 'RngRandomProperties',
+                                      'if': 'CONFIG_POSIX' },
       'secret':                     'SecretProperties',
-      'secret_keyring':             'SecretKeyringProperties',
+      'secret_keyring':             { 'type': 'SecretKeyringProperties',
+                                      'if': 'CONFIG_SECRET_KEYRING' },
       'sev-guest':                  'SevGuestProperties',
       'throttle-group':             'ThrottleGroupProperties',
       'tls-creds-anon':             'TlsCredsAnonProperties',

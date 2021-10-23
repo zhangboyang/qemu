@@ -129,9 +129,6 @@ typedef struct HexagonCPU {
 
 #include "cpu_bits.h"
 
-#define cpu_signal_handler cpu_hexagon_signal_handler
-int cpu_hexagon_signal_handler(int host_signum, void *pinfo, void *puc);
-
 static inline void cpu_get_tb_cpu_state(CPUHexagonState *env, target_ulong *pc,
                                         target_ulong *cs_base, uint32_t *flags)
 {
@@ -139,6 +136,15 @@ static inline void cpu_get_tb_cpu_state(CPUHexagonState *env, target_ulong *pc,
     *cs_base = 0;
 #ifdef CONFIG_USER_ONLY
     *flags = 0;
+#else
+#error System mode not supported on Hexagon yet
+#endif
+}
+
+static inline int cpu_mmu_index(CPUHexagonState *env, bool ifetch)
+{
+#ifdef CONFIG_USER_ONLY
+    return MMU_USER_IDX;
 #else
 #error System mode not supported on Hexagon yet
 #endif

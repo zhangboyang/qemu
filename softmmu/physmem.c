@@ -756,6 +756,7 @@ void cpu_address_space_init(CPUState *cpu, int asidx,
     if (tcg_enabled()) {
         newas->tcg_as_listener.log_global_after_sync = tcg_log_global_after_sync;
         newas->tcg_as_listener.commit = tcg_commit;
+        newas->tcg_as_listener.name = "tcg";
         memory_listener_register(&newas->tcg_as_listener, as);
     }
 }
@@ -1451,6 +1452,9 @@ static int64_t get_file_align(int fd)
         path = g_strdup_printf("/sys/dev/char/%d:%d",
                     major(st.st_rdev), minor(st.st_rdev));
         rpath = realpath(path, NULL);
+        if (!rpath) {
+            return -errno;
+        }
 
         rc = daxctl_new(&ctx);
         if (rc) {
@@ -2052,7 +2056,8 @@ RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, MemoryRegion *mr,
     int64_t file_size, file_align;
 
     /* Just support these ram flags by now. */
-    assert((ram_flags & ~(RAM_SHARED | RAM_PMEM | RAM_NORESERVE)) == 0);
+    assert((ram_flags & ~(RAM_SHARED | RAM_PMEM | RAM_NORESERVE |
+                          RAM_PROTECTED)) == 0);
 
     if (xen_enabled()) {
         error_setg(errp, "-mem-path not supported with Xen");
@@ -2075,7 +2080,7 @@ RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, MemoryRegion *mr,
     }
 
     file_align = get_file_align(fd);
-    if (file_align > 0 && mr && file_align > mr->align) {
+    if (file_align > 0 && file_align > mr->align) {
         error_setg(errp, "backing store align 0x%" PRIx64
                    " is larger than 'align' option 0x%" PRIx64,
                    file_align, mr->align);

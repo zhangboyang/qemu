@@ -210,8 +210,8 @@
 #define CSR_MTVAL2          0x34b
 
 /* Enhanced Physical Memory Protection (ePMP) */
-#define CSR_MSECCFG         0x390
-#define CSR_MSECCFGH        0x391
+#define CSR_MSECCFG         0x747
+#define CSR_MSECCFGH        0x757
 /* Physical Memory Protection */
 #define CSR_PMPCFG0         0x3a0
 #define CSR_PMPCFG1         0x3a1
@@ -364,9 +364,11 @@
 #define MISA32_MXL          0xC0000000
 #define MISA64_MXL          0xC000000000000000ULL
 
-#define MXL_RV32            1
-#define MXL_RV64            2
-#define MXL_RV128           3
+typedef enum {
+    MXL_RV32  = 1,
+    MXL_RV64  = 2,
+    MXL_RV128 = 3,
+} RISCVMXL;
 
 /* sstatus CSR bits */
 #define SSTATUS_UIE         0x00000001
@@ -397,10 +399,10 @@
 #define HSTATUS32_WPRI       0xFF8FF87E
 #define HSTATUS64_WPRI       0xFFFFFFFFFF8FF87EULL
 
-#define HCOUNTEREN_CY        (1 << 0)
-#define HCOUNTEREN_TM        (1 << 1)
-#define HCOUNTEREN_IR        (1 << 2)
-#define HCOUNTEREN_HPM3      (1 << 3)
+#define COUNTEREN_CY         (1 << 0)
+#define COUNTEREN_TM         (1 << 1)
+#define COUNTEREN_IR         (1 << 2)
+#define COUNTEREN_HPM3       (1 << 3)
 
 /* Privilege modes */
 #define PRV_U 0
@@ -426,14 +428,6 @@
 #define SATP64_MODE         0xF000000000000000ULL
 #define SATP64_ASID         0x0FFFF00000000000ULL
 #define SATP64_PPN          0x00000FFFFFFFFFFFULL
-
-/* VM modes (mstatus.vm) privileged ISA 1.9.1 */
-#define VM_1_09_MBARE       0
-#define VM_1_09_MBB         1
-#define VM_1_09_MBBID       2
-#define VM_1_09_SV32        8
-#define VM_1_09_SV39        9
-#define VM_1_09_SV48        10
 
 /* VM modes (satp.mode) privileged ISA 1.10 */
 #define VM_1_10_MBARE       0
